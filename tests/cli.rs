@@ -286,6 +286,31 @@ impl TestProject {
         output
     }
 
+    fn run_print(&self, prompt: &str, format: &str) -> Output {
+        let output = Command::new(env!("CARGO_BIN_EXE_latigo"))
+            .arg("--config")
+            .arg(&self.config)
+            .arg("--workspace")
+            .arg(&self.workspace)
+            .arg("--sessions-dir")
+            .arg(&self.sessions)
+            .arg("--prompt")
+            .arg(prompt)
+            .arg("--output-format")
+            .arg(format)
+            .env("OPENAI_API_KEY", "test-key")
+            .env("TERM", "dumb")
+            .output()
+            .expect("run print mode");
+        assert!(
+            output.status.success(),
+            "stdout: {}\nstderr: {}",
+            stdout(&output),
+            stderr(&output)
+        );
+        output
+    }
+
     fn session_files(&self) -> Vec<PathBuf> {
         fs::read_dir(&self.sessions)
             .map(|entries| {
@@ -976,4 +1001,37 @@ max_steps = 3
             .to_string()
             .contains("Subagent final report")
     );
+}
+
+#[test]
+fn print_mode_supports_text_json_and_stream_json() {
+    let provider = MockProvider::start(vec![
+        MockResponse::text("One-shot response"),
+        MockResponse::text("JSON response"),
+        MockResponse::tool_call("print-list", "list_files", json!({})),
+        MockResponse::text("Stream response"),
+    ]);
+    let project = TestProject::new(&provider);
+
+    let text = project.run_print("Text request", "text");
+    assert_eq!(stdout(&text), "One-shot response\n");
+    assert!(!stdout(&text).contains("Latigo |"));
+
+    let json_output = project.run_print("JSON request", "json");
+    let result: Value = serde_json::from_str(&stdout(&json_output)).unwrap();
+    assert_eq!(result["type"], "result");
+    assert_eq!(result["response"], "JSON response");
+    assert_eq!(result["model"], "mock-model");
+
+    let stream = project.run_print("Stream request", "stream-json");
+    let events = stdout(&stream)
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert!(events.iter().any(|event| event["type"] == "tool_call"));
+    assert!(events.iter().any(|event| event["type"] == "tool_result"));
+    assert!(events.iter().any(|event| event["type"] == "assistant"));
+    assert_eq!(events.last().unwrap()["type"], "result");
+    assert_eq!(events.last().unwrap()["response"], "Stream response");
+    assert!(stderr(&stream).is_empty());
 }

@@ -7,6 +7,7 @@ A latigo is the strap that secures a saddle's cinch. Latigo secures the setup ar
 ## Features
 
 - Streaming model responses and tool calls
+- Non-interactive print mode with text, JSON, and JSONL output
 - Ratatui interface with scrollable history, Markdown rendering, and expandable tool output
 - OpenAI-compatible providers, including Kimi
 - Persistent sessions with workspace-specific resume
@@ -132,6 +133,20 @@ If `context_window` is omitted, Latigo tries to discover it from the provider's 
 Reasoning effort can be set with `--effort`, `AGENT_REASONING_EFFORT`, or `reasoning_effort` in `config.toml`. If none is set, Latigo omits the request field and uses the provider's default.
 
 Run `latigo --help` for all command-line options.
+
+## Non-interactive execution
+
+Run one prompt without opening the interactive interface:
+
+```bash
+latigo -p "Summarize this repository"
+latigo -p "List the main modules" --output-format json
+latigo -p "Inspect the workspace" --output-format stream-json
+```
+
+`text` is the default and writes only assistant text to stdout. `json` writes one final result object. `stream-json` writes newline-delimited assistant, tool-call, tool-result, compaction, and final-result events. In text and JSON modes, tool progress and diagnostics go to stderr. Sessions are persisted normally.
+
+Print mode retains the configured permission mode. If an action requires approval, Latigo denies it with a diagnostic rather than waiting for input that may never arrive. For unattended tasks in a trusted workspace, explicitly select `--permission-mode auto`; dangerous commands can still require approval and will be denied when no interactive handler is available.
 
 ## Interactive commands
 
@@ -372,7 +387,7 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 
-The integration tests use a reusable mock provider and cover streaming, sessions, tool calls, retries, model metadata, sensitive-file protection, background tasks, Kimi search, image attachments, MCP stdio tool calls, lifecycle hooks, plugin extensions, and isolated subagents. Unit tests also cover subagent tool filtering, plugin command expansion, hook control responses, MCP result handling, Markdown rendering, input editing and completion, tool-output expansion, and process-group shutdown.
+The integration tests use a reusable mock provider and cover streaming, sessions, print-mode output formats, tool calls, retries, model metadata, sensitive-file protection, background tasks, Kimi search, image attachments, MCP stdio tool calls, lifecycle hooks, plugin extensions, and isolated subagents. Unit tests also cover subagent tool filtering, plugin command expansion, hook control responses, MCP result handling, Markdown rendering, input editing and completion, tool-output expansion, and process-group shutdown.
 
 ## Roadmap
 

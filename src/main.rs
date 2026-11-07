@@ -20,7 +20,7 @@ use std::str::FromStr;
 
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use rustyline::completion::{Completer, Pair};
 use rustyline::error::ReadlineError;
 use rustyline::highlight::Highlighter;
@@ -49,6 +49,22 @@ struct Args {
 
     #[arg(long, default_value = ".", help = "Workspace directory")]
     workspace: PathBuf,
+
+    #[arg(
+        short = 'p',
+        long,
+        help = "Run one prompt without opening the interface"
+    )]
+    prompt: Option<String>,
+
+    #[arg(
+        long,
+        value_enum,
+        default_value = "text",
+        requires = "prompt",
+        help = "Print-mode output: text, json, or stream-json"
+    )]
+    output_format: OutputFormat,
 
     #[arg(long, help = "Model ID (overrides OPENAI_MODEL and config)")]
     model: Option<String>,
@@ -80,6 +96,13 @@ struct Args {
 
     #[arg(long, help = "Session storage directory")]
     sessions_dir: Option<PathBuf>,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum OutputFormat {
+    Text,
+    Json,
+    StreamJson,
 }
 
 #[tokio::main]
@@ -173,7 +196,8 @@ async fn run() -> Result<()> {
             }
         },
     };
-    let interactive = io::stdin().is_terminal()
+    let interactive = args.prompt.is_none()
+        && io::stdin().is_terminal()
         && io::stdout().is_terminal()
         && env::var("TERM").is_ok_and(|term| term != "dumb");
     let interface = if interactive {
@@ -183,6 +207,10 @@ async fn run() -> Result<()> {
     };
     let approval_handler: Box<dyn FnMut(&str) -> bool> = match &interface {
         Some(interface) => interface.approval_handler(),
+        None if args.prompt.is_some() => Box::new(|action| {
+            eprintln!("Approval required but unavailable in print mode; rejected: {action}");
+            false
+        }),
         None => Box::new(approve),
     };
     let workspace = Workspace::new(
@@ -240,6 +268,14 @@ async fn run() -> Result<()> {
         agent.messages().to_vec(),
     );
     agent.start_session(session.id.clone()).await?;
+    if let Some(prompt) = args.prompt.as_deref() {
+        let result = run_print_mode(&mut agent, &session, prompt, args.output_format).await;
+        let end_result = agent.end_session().await;
+        save_session(&store, &mut session, &agent)?;
+        end_result?;
+        result?;
+        return Ok(());
+    }
     if let Some(interface) = interface {
         return interface
             .run(
@@ -553,7 +589,7 @@ async fn handle_command(
                 result.line(format!("Permission mode: {}", agent.permission_mode()));
             } else {
                 let mode =
-                    PermissionMode::from_str(argument).map_err(|error| anyhow::anyhow!(error))?;
+                    <PermissionMode as FromStr>::from_str(argument).map_err(|error| anyhow::anyhow!(error))?;
                 agent.set_permission_mode(mode);
                 result.line(format!("Permission mode changed to {mode}"));
                 if mode == PermissionMode::Auto {
@@ -566,6 +602,82 @@ async fn handle_command(
         _ => bail!("Unknown command: {command}. Use /help."),
     }
     Ok(result)
+}
+
+async fn run_print_mode(
+    agent: &mut Agent,
+    session: &Session,
+    prompt: &str,
+    format: OutputFormat,
+) -> Result<()> {
+    let mut response_started = false;
+    let result = {
+        let mut callback = |event: AgentEvent| match event {
+            AgentEvent::Content(content) => match format {
+                OutputFormat::Text => {
+                    response_started = true;
+                    print!("{content}");
+                    let _ = io::stdout().flush();
+                }
+                OutputFormat::StreamJson => print_json_event(&serde_json::json!({
+                    "type": "assistant",
+                    "content": content,
+                })),
+                OutputFormat::Json => {}
+            },
+            AgentEvent::ToolCall(name) => {
+                if matches!(format, OutputFormat::StreamJson) {
+                    print_json_event(&serde_json::json!({"type": "tool_call", "name": name}));
+                } else {
+                    eprintln!("[tool] {name}");
+                }
+            }
+            AgentEvent::ToolResult { name, output } => {
+                if matches!(format, OutputFormat::StreamJson) {
+                    print_json_event(&serde_json::json!({
+                        "type": "tool_result",
+                        "name": name,
+                        "content": output,
+                    }));
+                }
+            }
+            AgentEvent::Compacted { before, after } => {
+                if matches!(format, OutputFormat::StreamJson) {
+                    print_json_event(&serde_json::json!({
+                        "type": "compacted",
+                        "before_tokens": before,
+                        "after_tokens": after,
+                    }));
+                } else {
+                    eprintln!("[context compacted: ~{before} -> ~{after} tokens]");
+                }
+            }
+        };
+        agent.run(prompt, &mut callback).await
+    };
+    let response = result?;
+    match format {
+        OutputFormat::Text => {
+            if response_started {
+                println!();
+            }
+        }
+        OutputFormat::Json | OutputFormat::StreamJson => print_json_event(&serde_json::json!({
+            "type": "result",
+            "subtype": "success",
+            "response": response,
+            "session_id": session.id,
+            "model": agent.model(),
+            "context_tokens": agent.estimated_tokens(),
+            "context_window": agent.context_window(),
+        })),
+    }
+    Ok(())
+}
+
+fn print_json_event(value: &serde_json::Value) {
+    println!("{value}");
+    let _ = io::stdout().flush();
 }
 
 async fn run_prompt(agent: &mut Agent, prompt: &str) -> Result<()> {
@@ -718,7 +830,8 @@ fn env_bool(name: &str) -> Result<Option<bool>> {
 fn env_permission_mode() -> Result<Option<PermissionMode>> {
     match env::var("AGENT_PERMISSION_MODE") {
         Ok(value) => {
-            let mode = PermissionMode::from_str(&value).map_err(|error| anyhow::anyhow!(error))?;
+            let mode = <PermissionMode as FromStr>::from_str(&value)
+                .map_err(|error| anyhow::anyhow!(error))?;
             Ok(Some(mode))
         }
         Err(env::VarError::NotPresent) => Ok(None),
