@@ -14,6 +14,7 @@ A latigo is the strap that secures a saddle's cinch. Latigo secures the setup ar
 - Model listing and model switching
 - Metadata-driven reasoning-effort selection with provider defaults
 - Model Context Protocol (MCP) stdio servers with dynamic tool discovery
+- Lifecycle hooks with tool matchers, blocking decisions, and context injection
 - Context-window discovery and automatic or manual compaction
 - Text and image attachments
 - Workspace file search, reading, writing, and patching
@@ -146,6 +147,7 @@ Run `latigo --help` for all command-line options.
 /effort [value]       Show or set a provider-specific reasoning effort
 /effort default       Use the provider's default reasoning effort
 /mcp                  Show connected MCP servers and tool counts
+/hooks                Show configured lifecycle hooks
 /permissions [mode]   Show or set ask, auto-edit, or auto
 /exit                 Save and exit
 /quit                 Alias for /exit
@@ -214,6 +216,49 @@ Server names may contain ASCII letters, numbers, underscores, and hyphens. The s
 
 Use `/mcp` to inspect connected servers and tool counts. MCP calls require approval in `ask` and `auto-edit` modes and are allowed in `auto` mode. Latigo supports newline-delimited JSON-RPC MCP stdio transport, tool discovery, and tool calls; HTTP transport, resources, and prompts are not yet implemented.
 
+## Lifecycle hooks
+
+Hooks are trusted shell commands configured in `config.toml`. They run in the workspace and receive one JSON object on stdin with `hook_event_name`, `session_id`, `workspace`, and event-specific fields such as `prompt`, `tool_name`, `tool_input`, or `tool_result`.
+
+```toml
+[hooks]
+timeout_seconds = 10
+
+[[hooks.session_start]]
+command = "./hooks/session-start.sh"
+
+[[hooks.user_prompt_submit]]
+command = "./hooks/check-prompt.sh"
+
+[[hooks.pre_tool_use]]
+command = "./hooks/validate-tool.sh"
+matcher = "write_*"
+
+[[hooks.post_tool_use]]
+command = "./hooks/observe-tool.sh"
+matcher = "*"
+
+[[hooks.pre_compact]]
+command = "./hooks/compaction-guidance.sh"
+
+[[hooks.stop]]
+command = "./hooks/check-completion.sh"
+
+[[hooks.session_end]]
+command = "./hooks/cleanup.sh"
+```
+
+Supported events are `session_start`, `session_end`, `user_prompt_submit`, `pre_tool_use`, `post_tool_use`, `pre_compact`, and `stop`. Matchers are glob patterns and apply only to tool events. A hook can override the global timeout with its own `timeout_seconds`.
+
+Exit code 0 allows the operation. Exit code 2 blocks it and uses stderr, or stdout when stderr is empty, as the reason. Other exit codes are errors. Successful hooks can emit JSON lines with control responses:
+
+```json
+{"additionalContext":"Remember this project convention."}
+{"decision":"block","reason":"This operation is not allowed."}
+```
+
+Additional context is added to prompts, tool results, session startup, or compaction guidance as appropriate. A blocked stop hook, or one returning context, asks the model to continue. Plain non-JSON stdout is ignored. Use `/hooks` to inspect configured event counts. Hooks execute without a separate approval prompt, so only load configuration and plugins you trust.
+
 ## Permissions and safety
 
 The default permission mode is `ask`.
@@ -269,15 +314,14 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 
-The integration tests use a reusable mock provider and cover streaming, sessions, tool calls, retries, model metadata, sensitive-file protection, background tasks, Kimi search, image attachments, and MCP stdio tool calls. Unit tests also cover MCP result handling, Markdown rendering, input editing and completion, tool-output expansion, and process-group shutdown.
+The integration tests use a reusable mock provider and cover streaming, sessions, tool calls, retries, model metadata, sensitive-file protection, background tasks, Kimi search, image attachments, MCP stdio tool calls, and lifecycle hooks. Unit tests also cover hook control responses, MCP result handling, Markdown rendering, input editing and completion, tool-output expansion, and process-group shutdown.
 
 ## Roadmap
 
 The next planned milestones are:
 
-1. Hooks
-2. Plugins
-3. Subagents
+1. Plugins
+2. Subagents
 
 ## Project status
 

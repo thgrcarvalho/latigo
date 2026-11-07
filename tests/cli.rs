@@ -700,3 +700,111 @@ done
     );
     assert!(requests[1].body.to_string().contains("mcp says hello"));
 }
+
+#[cfg(unix)]
+#[test]
+fn runs_lifecycle_hooks_and_injects_context() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let provider = MockProvider::start(vec![
+        MockResponse::tool_call("list", "list_files", json!({})),
+        MockResponse::text("Hooks complete"),
+    ]);
+    let project = TestProject::new(&provider);
+    let script = project.workspace.join("hooks.sh");
+    fs::write(
+        &script,
+        r#"#!/bin/sh
+IFS= read -r payload
+printf '%s\n' "$LATIGO_HOOK_EVENT" >> hook-events.log
+case "$LATIGO_HOOK_EVENT" in
+  session_start) printf '%s\n' '{"additionalContext":"session-hook-context"}' ;;
+  user_prompt_submit) printf '%s\n' '{"additionalContext":"prompt-hook-context"}' ;;
+  pre_tool_use) printf '%s\n' '{"additionalContext":"pre-tool-context"}' ;;
+  post_tool_use) printf '%s\n' '{"additionalContext":"post-tool-context"}' ;;
+esac
+"#,
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&script).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&script, permissions).unwrap();
+    let mut extra = String::new();
+    for event in [
+        "session_start",
+        "session_end",
+        "user_prompt_submit",
+        "pre_tool_use",
+        "post_tool_use",
+        "stop",
+    ] {
+        extra.push_str(&format!(
+            "[[hooks.{event}]]\ncommand = \"{}\"\n",
+            script.display()
+        ));
+    }
+    project.write_config(&provider.base_url, &extra);
+
+    let output = project.run("Run hooks\n/hooks\n/exit\n");
+    assert!(stdout(&output).contains("Hooks complete"));
+    assert!(stdout(&output).contains("session_start: 1 hook(s)"));
+    let requests = provider.requests();
+    assert!(
+        requests[0]
+            .body
+            .to_string()
+            .contains("session-hook-context")
+    );
+    assert!(requests[0].body.to_string().contains("prompt-hook-context"));
+    let tool_result = requests[1].body.to_string();
+    assert!(tool_result.contains("pre-tool-context"));
+    assert!(tool_result.contains("post-tool-context"));
+    let events = fs::read_to_string(project.workspace.join("hook-events.log")).unwrap();
+    for event in [
+        "session_start",
+        "user_prompt_submit",
+        "pre_tool_use",
+        "post_tool_use",
+        "stop",
+        "session_end",
+    ] {
+        assert!(events.lines().any(|line| line == event), "missing {event}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn pre_tool_hook_can_block_execution() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let provider = MockProvider::start(vec![
+        MockResponse::tool_call("list", "list_files", json!({})),
+        MockResponse::text("Block handled"),
+    ]);
+    let project = TestProject::new(&provider);
+    let script = project.workspace.join("block.sh");
+    fs::write(
+        &script,
+        "#!/bin/sh\nIFS= read -r payload\nprintf 'blocked-by-test' >&2\nexit 2\n",
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&script).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&script, permissions).unwrap();
+    project.write_config(
+        &provider.base_url,
+        &format!(
+            "[[hooks.pre_tool_use]]\ncommand = \"{}\"\nmatcher = \"list_*\"\n",
+            script.display()
+        ),
+    );
+
+    let output = project.run("Run blocked tool\n/exit\n");
+    assert!(stdout(&output).contains("Block handled"));
+    assert!(
+        provider.requests()[1]
+            .body
+            .to_string()
+            .contains("blocked-by-test")
+    );
+}

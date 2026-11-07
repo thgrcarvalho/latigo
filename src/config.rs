@@ -5,6 +5,7 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
 use crate::client::RetryConfig;
+use crate::hooks::HooksConfig;
 use crate::mcp::McpConfig;
 use crate::tools::{CommandRules, PermissionMode};
 use crate::web::WebResearchConfig;
@@ -23,6 +24,7 @@ pub struct AppConfig {
     pub commands: CommandRules,
     pub web_research: WebResearchConfig,
     pub mcp: McpConfig,
+    pub hooks: HooksConfig,
     pub retry: RetryConfig,
 }
 

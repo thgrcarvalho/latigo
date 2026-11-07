@@ -2,6 +2,7 @@ use anyhow::{Context, Result, bail};
 use serde_json::{Map, Value, json};
 
 use crate::client::{ModelInfo, OpenAICompatibleClient};
+use crate::hooks::{HookEvent, HookRunner, HooksConfig};
 use crate::mcp::McpManager;
 use crate::tools::{PermissionMode, Workspace};
 use crate::web::{WebResearch, WebResearchConfig};
@@ -13,14 +14,21 @@ pub enum AgentEvent {
     Compacted { before: usize, after: usize },
 }
 
+#[derive(Clone, Copy)]
+pub struct AgentOptions {
+    pub max_steps: usize,
+    pub context_window: usize,
+    pub auto_compact: bool,
+}
+
 pub struct Agent {
     client: OpenAICompatibleClient,
     workspace: Workspace,
     web: WebResearch,
     mcp: McpManager,
-    max_steps: usize,
-    context_window: usize,
-    auto_compact: bool,
+    hooks: HookRunner,
+    session_id: String,
+    options: AgentOptions,
     messages: Vec<Value>,
     image_support: Option<bool>,
 }
@@ -31,9 +39,8 @@ impl Agent {
         workspace: Workspace,
         web_config: WebResearchConfig,
         mcp: McpManager,
-        max_steps: usize,
-        context_window: usize,
-        auto_compact: bool,
+        hooks_config: HooksConfig,
+        options: AgentOptions,
     ) -> Result<Self> {
         let system_message = json!({
             "role": "system",
@@ -42,14 +49,15 @@ impl Agent {
                 workspace.root.display()
             ),
         });
+        let hooks = HookRunner::new(hooks_config, &workspace.root)?;
         Ok(Self {
             client: client.clone(),
             workspace,
             web: WebResearch::new(web_config, client)?,
             mcp,
-            max_steps,
-            context_window,
-            auto_compact,
+            hooks,
+            session_id: "unassigned".to_string(),
+            options,
             messages: vec![system_message],
             image_support: None,
         })
@@ -92,7 +100,7 @@ impl Agent {
     pub async fn refresh_context_window(&mut self) -> Result<Option<usize>> {
         let context_window = self.client.model_context_window().await?;
         if let Some(value) = context_window.filter(|value| *value > 0) {
-            self.context_window = value;
+            self.options.context_window = value;
             Ok(Some(value))
         } else {
             Ok(None)
@@ -105,6 +113,39 @@ impl Agent {
 
     pub fn mcp_status(&self) -> Vec<String> {
         self.mcp.status()
+    }
+
+    pub fn hooks_status(&self) -> Vec<String> {
+        self.hooks.status()
+    }
+
+    pub async fn start_session(&mut self, session_id: String) -> Result<()> {
+        self.session_id = session_id;
+        let outcome = self
+            .hooks
+            .run(HookEvent::SessionStart, &self.session_id, None, json!({}))
+            .await?;
+        if let Some(reason) = outcome.blocked {
+            bail!("Session start blocked: {reason}");
+        }
+        if !outcome.context.is_empty() {
+            self.messages.push(json!({
+                "role": "system",
+                "content": format!("Context from session-start hooks:\n{}", outcome.context.join("\n"))
+            }));
+        }
+        Ok(())
+    }
+
+    pub async fn end_session(&self) -> Result<()> {
+        let outcome = self
+            .hooks
+            .run(HookEvent::SessionEnd, &self.session_id, None, json!({}))
+            .await?;
+        if let Some(reason) = outcome.blocked {
+            bail!("Session end blocked: {reason}");
+        }
+        Ok(())
     }
 
     pub fn permission_mode(&self) -> PermissionMode {
@@ -136,15 +177,29 @@ impl Agent {
     }
 
     pub fn context_window(&self) -> usize {
-        self.context_window
+        self.options.context_window
     }
 
     pub async fn compact(&mut self) -> Result<(usize, usize)> {
         if self.messages.len() <= 1 {
             bail!("There is no conversation to compact");
         }
+        let compaction_hook = self
+            .hooks
+            .run(HookEvent::PreCompact, &self.session_id, None, json!({}))
+            .await?;
+        if let Some(reason) = compaction_hook.blocked {
+            bail!("Compaction blocked: {reason}");
+        }
         let before = self.estimated_tokens();
-        let transcript = serde_json::to_string_pretty(&sanitized_messages(&self.messages[1..]))?;
+        let mut transcript =
+            serde_json::to_string_pretty(&sanitized_messages(&self.messages[1..]))?;
+        if !compaction_hook.context.is_empty() {
+            transcript.push_str(&format!(
+                "\n\nAdditional compaction guidance:\n{}",
+                compaction_hook.context.join("\n")
+            ));
+        }
         let request = vec![
             json!({
                 "role": "system",
@@ -173,9 +228,29 @@ impl Agent {
         prompt: &str,
         on_event: &mut dyn FnMut(AgentEvent),
     ) -> Result<String> {
-        let prompt = self.build_user_message(prompt).await?;
+        let prompt_hook = self
+            .hooks
+            .run(
+                HookEvent::UserPromptSubmit,
+                &self.session_id,
+                None,
+                json!({"prompt": prompt}),
+            )
+            .await?;
+        if let Some(reason) = prompt_hook.blocked {
+            bail!("Prompt blocked: {reason}");
+        }
+        let expanded_prompt = if prompt_hook.context.is_empty() {
+            prompt.to_string()
+        } else {
+            format!(
+                "{prompt}\n\n[Context from prompt hooks]\n{}",
+                prompt_hook.context.join("\n")
+            )
+        };
+        let prompt = self.build_user_message(&expanded_prompt).await?;
         self.messages.push(prompt);
-        for _ in 0..self.max_steps {
+        for _ in 0..self.options.max_steps {
             for notification in self.workspace.take_task_notifications().await {
                 self.messages.push(json!({
                     "role": "user",
@@ -206,7 +281,34 @@ impl Agent {
                 .to_string();
             self.messages.push(message);
             if tool_calls.is_empty() {
-                return Ok(content);
+                let stop = self
+                    .hooks
+                    .run(
+                        HookEvent::Stop,
+                        &self.session_id,
+                        None,
+                        json!({"response": content}),
+                    )
+                    .await?;
+                if stop.blocked.is_none() && stop.context.is_empty() {
+                    return Ok(content);
+                }
+                let mut continuation = String::new();
+                if let Some(reason) = stop.blocked {
+                    continuation.push_str(&format!("Stop hook requested continuation: {reason}"));
+                }
+                if !stop.context.is_empty() {
+                    if !continuation.is_empty() {
+                        continuation.push('\n');
+                    }
+                    continuation.push_str(&format!(
+                        "Additional context from stop hooks:\n{}",
+                        stop.context.join("\n")
+                    ));
+                }
+                self.messages
+                    .push(json!({"role": "user", "content": continuation}));
+                continue;
             }
             for call in tool_calls {
                 let name = call
@@ -230,7 +332,7 @@ impl Agent {
         }
         bail!(
             "Agent exceeded the limit of {} model calls.",
-            self.max_steps
+            self.options.max_steps
         )
     }
 
@@ -301,8 +403,11 @@ impl Agent {
     }
 
     async fn maybe_compact(&mut self, on_event: &mut dyn FnMut(AgentEvent)) -> Result<()> {
-        let threshold = self.context_window * 70 / 100;
-        if !self.auto_compact || self.messages.len() <= 1 || self.estimated_tokens() < threshold {
+        let threshold = self.options.context_window * 70 / 100;
+        if !self.options.auto_compact
+            || self.messages.len() <= 1
+            || self.estimated_tokens() < threshold
+        {
             return Ok(());
         }
         let (before, after) = self.compact().await?;
@@ -311,10 +416,45 @@ impl Agent {
     }
 
     async fn execute_tool(&mut self, call: &Value) -> String {
-        match self.try_execute_tool(call).await {
+        let name = call
+            .get("function")
+            .and_then(|function| function.get("name"))
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_string();
+        let result = self.try_execute_tool(call).await;
+        let post = self
+            .hooks
+            .run(
+                HookEvent::PostToolUse,
+                &self.session_id,
+                Some(&name),
+                json!({
+                    "tool_name": name,
+                    "tool_call": call,
+                    "tool_result": result.as_ref().map(|output| output.clone()).unwrap_or_else(|error| format!("Error: {error}"))
+                }),
+            )
+            .await;
+        let mut output = match result {
             Ok(result) => result,
             Err(error) => format!("Error: {error}"),
+        };
+        match post {
+            Ok(post) => {
+                if let Some(reason) = post.blocked {
+                    output.push_str(&format!("\n\nPost-tool hook blocked the result: {reason}"));
+                }
+                if !post.context.is_empty() {
+                    output.push_str(&format!(
+                        "\n\n[Context from post-tool hooks]\n{}",
+                        post.context.join("\n")
+                    ));
+                }
+            }
+            Err(error) => output.push_str(&format!("\n\nPost-tool hook error: {error:#}")),
         }
+        output
     }
 
     async fn try_execute_tool(&mut self, call: &Value) -> Result<String> {
@@ -330,7 +470,19 @@ impl Agent {
         let arguments = arguments
             .as_object()
             .context("Tool arguments must be a JSON object")?;
-        match name {
+        let pre = self
+            .hooks
+            .run(
+                HookEvent::PreToolUse,
+                &self.session_id,
+                Some(name),
+                json!({"tool_name": name, "tool_input": arguments}),
+            )
+            .await?;
+        if let Some(reason) = pre.blocked {
+            bail!("Tool call blocked: {reason}");
+        }
+        let result = match name {
             "list_files" => self
                 .workspace
                 .list_files(optional_string(arguments, "path", ".")?),
@@ -409,7 +561,15 @@ impl Agent {
                 self.mcp.call_tool(name, arguments).await
             }
             _ => bail!("Unknown tool: {name}"),
+        };
+        let mut output = result?;
+        if !pre.context.is_empty() {
+            output = format!(
+                "[Context from pre-tool hooks]\n{}\n\n{output}",
+                pre.context.join("\n")
+            );
         }
+        Ok(output)
     }
 }
 

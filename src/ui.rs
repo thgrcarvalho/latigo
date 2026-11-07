@@ -140,6 +140,7 @@ impl Interface {
             let prompt = match self.read_input()? {
                 IdleAction::Submit(prompt) => prompt,
                 IdleAction::Exit => {
+                    agent.end_session().await?;
                     save_session(store, session, agent)?;
                     return Ok(());
                 }

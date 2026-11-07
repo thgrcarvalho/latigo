@@ -1,6 +1,7 @@
 mod agent;
 mod client;
 mod config;
+mod hooks;
 mod mcp;
 mod session;
 mod tasks;
@@ -26,7 +27,7 @@ use rustyline::history::DefaultHistory;
 use rustyline::validate::Validator;
 use rustyline::{Context as ReadlineContext, Editor, Helper};
 
-use crate::agent::{Agent, AgentEvent};
+use crate::agent::{Agent, AgentEvent, AgentOptions};
 use crate::client::OpenAICompatibleClient;
 use crate::config::AppConfig;
 use crate::mcp::McpManager;
@@ -198,9 +199,12 @@ async fn run() -> Result<()> {
         workspace,
         config.web_research,
         mcp,
-        max_steps,
-        context_window,
-        auto_compact,
+        config.hooks,
+        AgentOptions {
+            max_steps,
+            context_window,
+            auto_compact,
+        },
     )?;
     let history_path = sessions_dir
         .parent()
@@ -213,6 +217,7 @@ async fn run() -> Result<()> {
         workspace_root.clone(),
         agent.messages().to_vec(),
     );
+    agent.start_session(session.id.clone()).await?;
     if let Some(interface) = interface {
         return interface
             .run(
@@ -249,6 +254,7 @@ async fn run() -> Result<()> {
             Ok(input) => input,
             Err(ReadlineError::Interrupted | ReadlineError::Eof) => {
                 println!();
+                agent.end_session().await?;
                 save_session(&store, &mut session, &agent)?;
                 return Ok(());
             }
@@ -331,11 +337,12 @@ async fn handle_command(
     let mut result = CommandResult::default();
     match command {
         "/exit" | "/quit" => {
+            agent.end_session().await?;
             save_session(store, session, agent)?;
             result.exit = true;
         }
         "/help" => result.line(
-            "Commands:\n  /help                 Show commands\n  /new                  Start a new session\n  /sessions             List saved sessions\n  /resume <id>          Resume a session in this workspace\n  /delete <id>          Delete a saved session\n  /clear                Clear current conversation\n  /compact              Compact current conversation\n  /usage                Show estimated context usage\n  /models               Browse and select models\n  /model [id]           Show or change the model\n  /effort [value]       Show, set, or use default reasoning effort\n  /mcp                  Show connected MCP servers and tool counts\n  /permissions [mode]   Show or set ask, auto-edit, or auto\n  /exit                 Save and exit",
+            "Commands:\n  /help                 Show commands\n  /new                  Start a new session\n  /sessions             List saved sessions\n  /resume <id>          Resume a session in this workspace\n  /delete <id>          Delete a saved session\n  /clear                Clear current conversation\n  /compact              Compact current conversation\n  /usage                Show estimated context usage\n  /models               Browse and select models\n  /model [id]           Show or change the model\n  /effort [value]       Show, set, or use default reasoning effort\n  /mcp                  Show connected MCP servers and tool counts\n  /hooks                Show configured lifecycle hooks\n  /permissions [mode]   Show or set ask, auto-edit, or auto\n  /exit                 Save and exit",
         ),
         "/new" => {
             save_session(store, session, agent)?;
@@ -346,6 +353,7 @@ async fn handle_command(
                 workspace_root.to_path_buf(),
                 agent.messages().to_vec(),
             );
+            agent.start_session(session.id.clone()).await?;
             result.line(format!("Started session {}", session.short_id()));
         }
         "/sessions" => {
@@ -385,6 +393,7 @@ async fn handle_command(
                 loaded.model
             ));
             *session = loaded;
+            agent.start_session(session.id.clone()).await?;
         }
         "/delete" => {
             let deleted = store.load(argument)?;
@@ -400,6 +409,7 @@ async fn handle_command(
                     workspace_root.to_path_buf(),
                     agent.messages().to_vec(),
                 );
+                agent.start_session(session.id.clone()).await?;
             }
             result.line(format!("Deleted session {}", deleted.short_id()));
         }
@@ -423,6 +433,15 @@ async fn handle_command(
         "/mcp" => {
             for status in agent.mcp_status() {
                 result.line(status);
+            }
+        }
+        "/hooks" => {
+            let status = agent.hooks_status();
+            if status.is_empty() {
+                result.line("No lifecycle hooks configured.");
+            }
+            for line in status {
+                result.line(line);
             }
         }
         "/models" => {
@@ -673,6 +692,7 @@ const SLASH_COMMANDS: &[&str] = &[
     "/model",
     "/effort",
     "/mcp",
+    "/hooks",
     "/permissions",
     "/exit",
     "/quit",
