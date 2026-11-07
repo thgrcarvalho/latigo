@@ -10,7 +10,7 @@ A latigo is the strap that secures a saddle's cinch. Latigo secures the setup ar
 - Non-interactive print mode with text, JSON, and JSONL output
 - Ratatui interface with scrollable history, Markdown rendering, and expandable tool output
 - OpenAI-compatible providers, including Kimi
-- Persistent sessions with workspace-specific resume
+- Persistent sessions with workspace-specific resume, continuation, titles, and forks
 - Hierarchical user and project `AGENTS.md` instructions
 - Runtime status and offline configuration diagnostics
 - Input history and slash-command completion
@@ -174,6 +174,8 @@ Print mode retains the configured permission mode. If an action requires approva
 /help                 Show commands
 /new                  Start a new session
 /sessions             List saved sessions
+/fork                 Save an independent copy and stay in the current session
+/title [text]         Show or set the session title
 /resume <id>          Resume a session in the current workspace
 /delete <id>          Delete a saved session after confirmation
 /clear                Clear the current conversation
@@ -198,6 +200,18 @@ Interactive terminals use a full-screen Ratatui interface. Non-interactive runs 
 Use the up and down arrows to navigate input history and Tab to complete slash commands. In the Ratatui interface, `/models` and `/effort` open pickers: use Up/Down to move, Enter to select, and Escape to cancel. Effort choices and defaults come from the current model's metadata rather than a hardcoded list. Direct `/effort <value>` input remains available for provider-specific values. PageUp and PageDown scroll through conversation history, and Ctrl-T expands or collapses tool output. Ctrl-C cancels active model work; at the prompt, Ctrl-C saves the session and exits. Approval dialogs accept `y` and reject with `n`, Enter, or Escape.
 
 Sessions are stored in `~/.latigo/sessions` by default. Input history and background-task data are stored alongside them under `~/.latigo`.
+
+Continue the latest session in the active workspace, or resume a specific ID, from a new process:
+
+```bash
+latigo --continue
+latigo --resume <id>
+latigo --resume <id> --fork-session
+```
+
+`--session` is an alias for `--resume`, and `-c` and `-r` are short forms for continuation and resume. Resuming restores messages, model, and reasoning effort, and refreshes context-window discovery when no explicit override is set. Sessions from other workspaces are rejected.
+
+`/fork` saves a full independent copy with a new ID while keeping the current session active. `--fork-session` does the same during startup. `/title <text>` assigns a title of up to 200 characters for easier identification in `/sessions`.
 
 ## Attachments
 
@@ -408,11 +422,11 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 
-The integration tests use a reusable mock provider and cover streaming, sessions, print-mode output formats, instruction loading, offline diagnostics, tool calls, retries, model metadata, sensitive-file protection, background tasks, Kimi search, image attachments, MCP stdio tool calls, lifecycle hooks, plugin extensions, and isolated subagents. Unit tests also cover instruction precedence, subagent tool filtering, plugin command expansion, hook control responses, MCP result handling, Markdown rendering, input editing and completion, tool-output expansion, and process-group shutdown.
+The integration tests use a reusable mock provider and cover streaming, session resume and forking, print-mode output formats, instruction loading, offline diagnostics, tool calls, retries, model metadata, sensitive-file protection, background tasks, Kimi search, image attachments, MCP stdio tool calls, lifecycle hooks, plugin extensions, and isolated subagents. Unit tests also cover instruction precedence, subagent tool filtering, plugin command expansion, hook control responses, MCP result handling, Markdown rendering, input editing and completion, tool-output expansion, and process-group shutdown.
 
 ## Roadmap
 
-The initial roadmap is complete: MCP, hooks, plugins, and subagents are implemented. Further milestones will be selected from established CLI-agent workflows and documented with the corresponding changes.
+The initial roadmap is complete: MCP, hooks, plugins, and subagents are implemented. The established-workflow additions also include print mode, project instructions, diagnostics, session continuation, titles, and forking. Future milestones will be selected from established CLI-agent workflows and documented with the corresponding changes.
 
 ## Project status
 

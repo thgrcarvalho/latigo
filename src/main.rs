@@ -68,6 +68,28 @@ struct Args {
     )]
     output_format: OutputFormat,
 
+    #[arg(
+        short = 'r',
+        long,
+        visible_alias = "session",
+        conflicts_with = "continue_session",
+        help = "Resume a session ID in the current workspace"
+    )]
+    resume: Option<String>,
+
+    #[arg(
+        short = 'c',
+        long = "continue",
+        help = "Continue the latest session in the current workspace"
+    )]
+    continue_session: bool,
+
+    #[arg(
+        long,
+        help = "Create a new session ID when resuming with --resume or --continue"
+    )]
+    fork_session: bool,
+
     #[arg(long, help = "Model ID (overrides OPENAI_MODEL and config)")]
     model: Option<String>,
 
@@ -133,6 +155,9 @@ async fn run() -> Result<()> {
             .or_else(|| args.config.clone())
             .unwrap_or(default_config_path()?);
         return doctor(&config_path, required);
+    }
+    if args.fork_session && args.resume.is_none() && !args.continue_session {
+        bail!("--fork-session requires --resume or --continue");
     }
     let config_required = args.config.is_some();
     let config_path = match &args.config {
@@ -288,6 +313,37 @@ async fn run() -> Result<()> {
         workspace_root.clone(),
         agent.messages().to_vec(),
     );
+    let resumed = if args.continue_session {
+        Some(
+            store
+                .latest_for_workspace(&workspace_root)?
+                .context("No saved sessions in the current workspace")?,
+        )
+    } else if let Some(id) = &args.resume {
+        Some(store.load(id)?)
+    } else {
+        None
+    };
+    if let Some(loaded) = resumed {
+        if loaded.workspace != workspace_root {
+            bail!(
+                "Session belongs to workspace {}. Start the harness there to resume it.",
+                loaded.workspace.display()
+            );
+        }
+        agent.set_model(loaded.model.clone());
+        agent.set_reasoning_effort(loaded.reasoning_effort.clone());
+        agent.restore_messages(loaded.messages.clone())?;
+        if context_window_override.is_none()
+            && let Err(error) = agent.refresh_context_window().await
+        {
+            eprintln!("Could not refresh the resumed model context window: {error:#}");
+        }
+        session = loaded;
+    }
+    if args.fork_session {
+        session = session.fork();
+    }
     agent.start_session(session.id.clone()).await?;
     if let Some(prompt) = args.prompt.as_deref() {
         let result = run_print_mode(&mut agent, &session, prompt, args.output_format).await;
@@ -438,7 +494,7 @@ async fn handle_command(
             result.exit = true;
         }
         "/help" => result.line(
-            "Commands:\n  /help                 Show commands\n  /new                  Start a new session\n  /sessions             List saved sessions\n  /resume <id>          Resume a session in this workspace\n  /delete <id>          Delete a saved session\n  /clear                Clear current conversation\n  /compact              Compact current conversation\n  /usage                Show estimated context usage\n  /status               Show runtime and loaded instruction files\n  /models               Browse and select models\n  /model [id]           Show or change the model\n  /effort [value]       Show, set, or use default reasoning effort\n  /mcp                  Show connected MCP servers and tool counts\n  /hooks                Show configured lifecycle hooks\n  /plugins              Show loaded plugins\n  /agents               Show configured subagents\n  /permissions [mode]   Show or set ask, auto-edit, or auto\n  /exit                 Save and exit",
+            "Commands:\n  /help                 Show commands\n  /new                  Start a new session\n  /sessions             List saved sessions\n  /fork                 Save an independent copy of this session\n  /title [text]         Show or set the session title\n  /resume <id>          Resume a session in this workspace\n  /delete <id>          Delete a saved session\n  /clear                Clear current conversation\n  /compact              Compact current conversation\n  /usage                Show estimated context usage\n  /status               Show runtime and loaded instruction files\n  /models               Browse and select models\n  /model [id]           Show or change the model\n  /effort [value]       Show, set, or use default reasoning effort\n  /mcp                  Show connected MCP servers and tool counts\n  /hooks                Show configured lifecycle hooks\n  /plugins              Show loaded plugins\n  /agents               Show configured subagents\n  /permissions [mode]   Show or set ask, auto-edit, or auto\n  /exit                 Save and exit",
         ),
         "/new" => {
             save_session(store, session, agent)?;
@@ -451,6 +507,36 @@ async fn handle_command(
             );
             agent.start_session(session.id.clone()).await?;
             result.line(format!("Started session {}", session.short_id()));
+        }
+        "/fork" => {
+            save_session(store, session, agent)?;
+            let fork = session.fork();
+            store.save(&fork)?;
+            result.line(format!(
+                "Forked session {}. Current session remains {}.\nResume the fork with: latigo --resume {}",
+                fork.short_id(),
+                session.short_id(),
+                fork.id
+            ));
+        }
+        "/title" => {
+            if argument.is_empty() {
+                result.line(format!(
+                    "Title: {}",
+                    if session.title.is_empty() {
+                        "Untitled"
+                    } else {
+                        &session.title
+                    }
+                ));
+            } else {
+                if argument.chars().count() > 200 {
+                    bail!("Session title cannot exceed 200 characters");
+                }
+                session.title = argument.to_string();
+                save_session(store, session, agent)?;
+                result.line(format!("Title changed to {}", session.title));
+            }
         }
         "/sessions" => {
             let sessions = store.list()?;
@@ -483,6 +569,19 @@ async fn handle_command(
             agent.set_model(loaded.model.clone());
             agent.set_reasoning_effort(loaded.reasoning_effort.clone());
             agent.restore_messages(loaded.messages.clone())?;
+            if discover_context_window {
+                match agent.refresh_context_window().await {
+                    Ok(Some(value)) => result.line(format!("Context window: {value} tokens")),
+                    Ok(None) => result.line(format!(
+                        "Could not discover the model context window; keeping {} tokens.",
+                        agent.context_window()
+                    )),
+                    Err(error) => result.line(format!(
+                        "Could not discover the model context window: {error:#}; keeping {} tokens.",
+                        agent.context_window()
+                    )),
+                }
+            }
             result.line(format!(
                 "Resumed session {} | {}",
                 loaded.short_id(),
@@ -914,6 +1013,8 @@ const SLASH_COMMANDS: &[&str] = &[
     "/help",
     "/new",
     "/sessions",
+    "/fork",
+    "/title",
     "/resume",
     "/delete",
     "/clear",

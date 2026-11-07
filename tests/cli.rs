@@ -253,7 +253,12 @@ impl TestProject {
     }
 
     fn run(&self, input: &str) -> Output {
+        self.run_with_args(input, &[])
+    }
+
+    fn run_with_args(&self, input: &str, arguments: &[&str]) -> Output {
         let output = Command::new(env!("CARGO_BIN_EXE_latigo"))
+            .args(arguments)
             .arg("--config")
             .arg(&self.config)
             .arg("--workspace")
@@ -1088,4 +1093,66 @@ fn doctor_validates_configuration_without_api_key_or_provider() {
         .unwrap();
     assert!(!invalid.status.success());
     assert!(stderr(&invalid).contains("max_steps must be at least 1"));
+}
+
+#[test]
+fn continues_resumes_titles_and_forks_sessions_across_processes() {
+    let provider = MockProvider::start(vec![
+        MockResponse::text("Initial response"),
+        MockResponse::text("Continued response"),
+    ]);
+    let project = TestProject::new(&provider);
+    project.run("Start the original session\n/exit\n");
+    let original: Value =
+        serde_json::from_str(&fs::read_to_string(&project.session_files()[0]).unwrap()).unwrap();
+    let original_id = original["id"].as_str().unwrap().to_string();
+
+    let continued = project.run_with_args("Continue with history\n/exit\n", &["--continue"]);
+    assert!(stdout(&continued).contains("Continued response"));
+    assert!(
+        provider.requests()[1]
+            .body
+            .to_string()
+            .contains("Start the original session")
+    );
+
+    let forked = project.run_with_args(
+        "/title Original title\n/fork\n/exit\n",
+        &["--resume", &original_id],
+    );
+    assert!(stdout(&forked).contains("Title changed to Original title"));
+    assert!(stdout(&forked).contains("latigo --resume"));
+    assert!(stdout(&forked).contains(&format!("Current session remains {}", &original_id[..8])));
+
+    project.run_with_args(
+        "/status\n/exit\n",
+        &["--resume", &original_id, "--fork-session"],
+    );
+    let sessions = project
+        .session_files()
+        .into_iter()
+        .map(|path| serde_json::from_str::<Value>(&fs::read_to_string(path).unwrap()).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(sessions.len(), 3);
+    let original = sessions
+        .iter()
+        .find(|session| session["id"] == original_id)
+        .unwrap();
+    assert_eq!(original["title"], "Original title");
+    assert!(
+        original["messages"]
+            .to_string()
+            .contains("Continue with history")
+    );
+    let forks = sessions
+        .iter()
+        .filter(|session| session["id"] != original_id)
+        .collect::<Vec<_>>();
+    assert_eq!(forks.len(), 2);
+    assert_ne!(forks[0]["id"], forks[1]["id"]);
+    assert!(
+        forks
+            .iter()
+            .all(|session| session["title"] == "Original title (fork)")
+    );
 }

@@ -43,6 +43,20 @@ impl Session {
     pub fn short_id(&self) -> &str {
         self.id.get(..8).unwrap_or(&self.id)
     }
+
+    pub fn fork(&self) -> Self {
+        let now = Utc::now();
+        let mut fork = self.clone();
+        fork.id = Uuid::new_v4().to_string();
+        fork.title = if self.title.is_empty() {
+            "Fork".to_string()
+        } else {
+            format!("{} (fork)", self.title)
+        };
+        fork.created_at = now;
+        fork.updated_at = now;
+        fork
+    }
 }
 
 pub struct SessionStore {
@@ -86,6 +100,13 @@ impl SessionStore {
         }
         sessions.sort_by_key(|session| std::cmp::Reverse(session.updated_at));
         Ok(sessions)
+    }
+
+    pub fn latest_for_workspace(&self, workspace: &std::path::Path) -> Result<Option<Session>> {
+        Ok(self
+            .list()?
+            .into_iter()
+            .find(|session| session.workspace == workspace))
     }
 
     pub fn load(&self, id_prefix: &str) -> Result<Session> {
