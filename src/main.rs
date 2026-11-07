@@ -1,6 +1,7 @@
 mod agent;
 mod client;
 mod config;
+mod mcp;
 mod session;
 mod tasks;
 mod tools;
@@ -28,6 +29,7 @@ use rustyline::{Context as ReadlineContext, Editor, Helper};
 use crate::agent::{Agent, AgentEvent};
 use crate::client::OpenAICompatibleClient;
 use crate::config::AppConfig;
+use crate::mcp::McpManager;
 use crate::session::{Session, SessionStore};
 use crate::tools::{PermissionMode, Workspace};
 
@@ -190,10 +192,12 @@ async fn run() -> Result<()> {
             .join("tasks"),
     )?;
     let workspace_root = workspace.root.clone();
+    let mcp = McpManager::connect(config.mcp, &workspace_root).await?;
     let mut agent = Agent::new(
         client,
         workspace,
         config.web_research,
+        mcp,
         max_steps,
         context_window,
         auto_compact,
@@ -331,7 +335,7 @@ async fn handle_command(
             result.exit = true;
         }
         "/help" => result.line(
-            "Commands:\n  /help                 Show commands\n  /new                  Start a new session\n  /sessions             List saved sessions\n  /resume <id>          Resume a session in this workspace\n  /delete <id>          Delete a saved session\n  /clear                Clear current conversation\n  /compact              Compact current conversation\n  /usage                Show estimated context usage\n  /models               Browse and select models\n  /model [id]           Show or change the model\n  /effort [value]       Show, set, or use default reasoning effort\n  /permissions [mode]   Show or set ask, auto-edit, or auto\n  /exit                 Save and exit",
+            "Commands:\n  /help                 Show commands\n  /new                  Start a new session\n  /sessions             List saved sessions\n  /resume <id>          Resume a session in this workspace\n  /delete <id>          Delete a saved session\n  /clear                Clear current conversation\n  /compact              Compact current conversation\n  /usage                Show estimated context usage\n  /models               Browse and select models\n  /model [id]           Show or change the model\n  /effort [value]       Show, set, or use default reasoning effort\n  /mcp                  Show connected MCP servers and tool counts\n  /permissions [mode]   Show or set ask, auto-edit, or auto\n  /exit                 Save and exit",
         ),
         "/new" => {
             save_session(store, session, agent)?;
@@ -416,6 +420,11 @@ async fn handle_command(
             agent.estimated_tokens(),
             agent.context_window()
         )),
+        "/mcp" => {
+            for status in agent.mcp_status() {
+                result.line(status);
+            }
+        }
         "/models" => {
             let models = agent.list_models().await?;
             if models.is_empty() {
@@ -663,6 +672,7 @@ const SLASH_COMMANDS: &[&str] = &[
     "/models",
     "/model",
     "/effort",
+    "/mcp",
     "/permissions",
     "/exit",
     "/quit",

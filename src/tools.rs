@@ -441,6 +441,16 @@ impl Workspace {
         ))
     }
 
+    pub fn authorize_mcp_tool(&mut self, name: &str, arguments: &serde_json::Value) -> bool {
+        if self.permission_mode == PermissionMode::Auto {
+            return true;
+        }
+        (self.approve)(&format!(
+            "Call external MCP tool {name}?\n\n{}",
+            truncate(&arguments.to_string(), 4000)
+        ))
+    }
+
     fn authorize_command(&mut self, command: &str) -> Result<bool> {
         self.command_rules.check(command)?;
         let requires_approval =

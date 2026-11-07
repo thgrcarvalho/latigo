@@ -643,3 +643,60 @@ fn coding_tools_and_text_attachments_work_together() {
         "beta\ngamma"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn discovers_and_calls_stdio_mcp_tools() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let provider = MockProvider::start(vec![
+        MockResponse::tool_call(
+            "mcp-call",
+            "mcp__fake__echo_message",
+            json!({"text": "hello"}),
+        ),
+        MockResponse::text("MCP complete"),
+    ]);
+    let project = TestProject::new(&provider);
+    let script = project.workspace.join("fake-mcp.sh");
+    fs::write(
+        &script,
+        r#"#!/bin/sh
+while IFS= read -r line; do
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"fake","version":"1"}}}'
+      ;;
+    *'"method":"tools/list"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"echo.message","description":"Echo a message","inputSchema":{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}}]}}'
+      ;;
+    *'"method":"tools/call"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"mcp says hello"}]}}'
+      ;;
+  esac
+done
+"#,
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&script).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&script, permissions).unwrap();
+    project.write_config(
+        &provider.base_url,
+        &format!(
+            "[mcp.servers.fake]\ncommand = \"{}\"\ntimeout_seconds = 5\n",
+            script.display()
+        ),
+    );
+
+    let output = project.run("Use MCP\ny\n/mcp\n/exit\n");
+    assert!(stdout(&output).contains("MCP complete"));
+    assert!(stdout(&output).contains("fake: connected, 1 tool(s)"));
+    let requests = provider.requests();
+    assert!(
+        requests[0].body["tools"]
+            .to_string()
+            .contains("mcp__fake__echo_message")
+    );
+    assert!(requests[1].body.to_string().contains("mcp says hello"));
+}

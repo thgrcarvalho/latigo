@@ -5,6 +5,7 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
 use crate::client::RetryConfig;
+use crate::mcp::McpConfig;
 use crate::tools::{CommandRules, PermissionMode};
 use crate::web::WebResearchConfig;
 
@@ -21,6 +22,7 @@ pub struct AppConfig {
     pub sessions_dir: Option<PathBuf>,
     pub commands: CommandRules,
     pub web_research: WebResearchConfig,
+    pub mcp: McpConfig,
     pub retry: RetryConfig,
 }
 

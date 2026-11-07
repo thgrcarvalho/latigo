@@ -2,6 +2,7 @@ use anyhow::{Context, Result, bail};
 use serde_json::{Map, Value, json};
 
 use crate::client::{ModelInfo, OpenAICompatibleClient};
+use crate::mcp::McpManager;
 use crate::tools::{PermissionMode, Workspace};
 use crate::web::{WebResearch, WebResearchConfig};
 
@@ -16,6 +17,7 @@ pub struct Agent {
     client: OpenAICompatibleClient,
     workspace: Workspace,
     web: WebResearch,
+    mcp: McpManager,
     max_steps: usize,
     context_window: usize,
     auto_compact: bool,
@@ -28,6 +30,7 @@ impl Agent {
         client: OpenAICompatibleClient,
         workspace: Workspace,
         web_config: WebResearchConfig,
+        mcp: McpManager,
         max_steps: usize,
         context_window: usize,
         auto_compact: bool,
@@ -43,6 +46,7 @@ impl Agent {
             client: client.clone(),
             workspace,
             web: WebResearch::new(web_config, client)?,
+            mcp,
             max_steps,
             context_window,
             auto_compact,
@@ -97,6 +101,10 @@ impl Agent {
 
     pub async fn list_models(&self) -> Result<Vec<ModelInfo>> {
         self.client.list_models().await
+    }
+
+    pub fn mcp_status(&self) -> Vec<String> {
+        self.mcp.status()
     }
 
     pub fn permission_mode(&self) -> PermissionMode {
@@ -177,13 +185,14 @@ impl Agent {
             self.maybe_compact(on_event).await?;
             let mut content_callback =
                 |content: &str| on_event(AgentEvent::Content(content.to_string()));
+            let mut tools = tool_definitions(self.web.search_tool_definition());
+            tools
+                .as_array_mut()
+                .expect("built-in tool definitions are an array")
+                .extend(self.mcp.tool_definitions());
             let message = self
                 .client
-                .chat_stream(
-                    &self.messages,
-                    &tool_definitions(self.web.search_tool_definition()),
-                    &mut content_callback,
-                )
+                .chat_stream(&self.messages, &tools, &mut content_callback)
                 .await?;
             let tool_calls = message
                 .get("tool_calls")
@@ -391,6 +400,13 @@ impl Agent {
                         optional_usize(arguments, "timeout")?.unwrap_or(30) as u64,
                     )
                     .await
+            }
+            _ if self.mcp.contains(name) => {
+                let arguments = Value::Object(arguments.clone());
+                if !self.workspace.authorize_mcp_tool(name, &arguments) {
+                    return Ok("MCP tool call rejected by the user.".to_string());
+                }
+                self.mcp.call_tool(name, arguments).await
             }
             _ => bail!("Unknown tool: {name}"),
         }

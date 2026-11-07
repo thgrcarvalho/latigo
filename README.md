@@ -13,6 +13,7 @@ A latigo is the strap that secures a saddle's cinch. Latigo secures the setup ar
 - Input history and slash-command completion
 - Model listing and model switching
 - Metadata-driven reasoning-effort selection with provider defaults
+- Model Context Protocol (MCP) stdio servers with dynamic tool discovery
 - Context-window discovery and automatic or manual compaction
 - Text and image attachments
 - Workspace file search, reading, writing, and patching
@@ -144,6 +145,7 @@ Run `latigo --help` for all command-line options.
 /model [id]           Show or directly change the model
 /effort [value]       Show or set a provider-specific reasoning effort
 /effort default       Use the provider's default reasoning effort
+/mcp                  Show connected MCP servers and tool counts
 /permissions [mode]   Show or set ask, auto-edit, or auto
 /exit                 Save and exit
 /quit                 Alias for /exit
@@ -190,6 +192,27 @@ Latigo exposes 13 tools to the model:
 - `wait_for`: wait for a background task to finish
 
 File tools are restricted to the selected workspace. Commands run in the workspace directory.
+
+## MCP servers
+
+Latigo starts configured Model Context Protocol servers over stdio, initializes them, and discovers their tools at startup. Tools are exposed as `mcp__server__tool` and retain the JSON schema supplied by the server.
+
+```toml
+[mcp.servers.filesystem]
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "."]
+timeout_seconds = 30
+
+[mcp.servers.local]
+command = "/path/to/server"
+args = ["--stdio"]
+cwd = "/path/to/working/directory"
+env = { PUBLIC_SETTING = "value" }
+```
+
+Server names may contain ASCII letters, numbers, underscores, and hyphens. The server working directory defaults to the Latigo workspace. Do not put credentials directly in `env`; use the server process's existing environment or a credential mechanism outside version-controlled configuration.
+
+Use `/mcp` to inspect connected servers and tool counts. MCP calls require approval in `ask` and `auto-edit` modes and are allowed in `auto` mode. Latigo supports newline-delimited JSON-RPC MCP stdio transport, tool discovery, and tool calls; HTTP transport, resources, and prompts are not yet implemented.
 
 ## Permissions and safety
 
@@ -246,16 +269,15 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 
-The integration tests use a reusable mock provider and cover streaming, sessions, tool calls, retries, model metadata, sensitive-file protection, background tasks, Kimi search, and image attachments. Unit tests also cover Markdown rendering, input editing and completion, tool-output expansion, and process-group shutdown.
+The integration tests use a reusable mock provider and cover streaming, sessions, tool calls, retries, model metadata, sensitive-file protection, background tasks, Kimi search, image attachments, and MCP stdio tool calls. Unit tests also cover MCP result handling, Markdown rendering, input editing and completion, tool-output expansion, and process-group shutdown.
 
 ## Roadmap
 
 The next planned milestones are:
 
-1. Model Context Protocol (MCP) support
-2. Hooks
-3. Plugins
-4. Subagents
+1. Hooks
+2. Plugins
+3. Subagents
 
 ## Project status
 
