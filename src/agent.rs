@@ -5,6 +5,7 @@ use crate::client::{ModelInfo, OpenAICompatibleClient};
 use crate::hooks::{HookEvent, HookRunner, HooksConfig};
 use crate::mcp::McpManager;
 use crate::plugins::PluginManager;
+use crate::subagents::{self, SubagentConfig};
 use crate::tools::{PermissionMode, Workspace};
 use crate::web::{WebResearch, WebResearchConfig};
 
@@ -15,11 +16,12 @@ pub enum AgentEvent {
     Compacted { before: usize, after: usize },
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct AgentOptions {
     pub max_steps: usize,
     pub context_window: usize,
     pub auto_compact: bool,
+    pub agents: std::collections::BTreeMap<String, SubagentConfig>,
 }
 
 pub struct Agent {
@@ -125,6 +127,17 @@ impl Agent {
 
     pub fn plugin_status(&self) -> Vec<String> {
         self.plugins.status()
+    }
+
+    pub fn subagent_status(&self) -> Vec<String> {
+        if self.options.agents.is_empty() {
+            return vec!["No subagents configured.".to_string()];
+        }
+        self.options
+            .agents
+            .iter()
+            .map(|(name, agent)| agent.status(name))
+            .collect()
     }
 
     pub fn expand_plugin_command(&self, input: &str) -> Result<Option<String>> {
@@ -276,11 +289,7 @@ impl Agent {
             self.maybe_compact(on_event).await?;
             let mut content_callback =
                 |content: &str| on_event(AgentEvent::Content(content.to_string()));
-            let mut tools = tool_definitions(self.web.search_tool_definition());
-            tools
-                .as_array_mut()
-                .expect("built-in tool definitions are an array")
-                .extend(self.mcp.tool_definitions());
+            let tools = self.available_tools(true);
             let message = self
                 .client
                 .chat_stream(&self.messages, &tools, &mut content_callback)
@@ -431,6 +440,97 @@ impl Agent {
         Ok(())
     }
 
+    fn run_subagent<'a>(
+        &'a mut self,
+        name: &'a str,
+        prompt: &'a str,
+    ) -> futures_util::future::LocalBoxFuture<'a, Result<String>> {
+        Box::pin(async move {
+            let config = self
+                .options
+                .agents
+                .get(name)
+                .cloned()
+                .with_context(|| format!("Unknown subagent: {name}"))?;
+            let mut client = self.client.clone();
+            if let Some(model) = &config.model {
+                client.set_model(model.clone());
+            }
+            if let Some(effort) = &config.reasoning_effort {
+                client.set_reasoning_effort((effort != "default").then(|| effort.clone()));
+            }
+            let tools = subagents::filter_tools(&self.available_tools(false), &config);
+            let instructions = if config.prompt.trim().is_empty() {
+                "Complete the delegated task and return a concise, useful report.".to_string()
+            } else {
+                config.prompt.clone()
+            };
+            let mut messages = vec![
+                json!({
+                    "role": "system",
+                    "content": format!(
+                        "You are the {name} subagent running in Latigo. {instructions}\nThe workspace is {}. Your conversation is isolated from the parent agent. Use only the tools exposed to you and return a final report to the parent.",
+                        self.workspace.root.display()
+                    )
+                }),
+                json!({"role": "user", "content": prompt}),
+            ];
+            let max_steps = config
+                .max_steps
+                .unwrap_or(self.options.max_steps.clamp(1, 10));
+            for _ in 0..max_steps {
+                let message = client
+                    .chat_stream(&messages, &tools, &mut |_: &str| {})
+                    .await?;
+                let tool_calls = message
+                    .get("tool_calls")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                let content = message
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                messages.push(message);
+                if tool_calls.is_empty() {
+                    return Ok(content);
+                }
+                for call in tool_calls {
+                    let tool_name = call
+                        .get("function")
+                        .and_then(|function| function.get("name"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown");
+                    let result = if config.allows_tool(tool_name) {
+                        self.execute_tool(&call).await
+                    } else {
+                        format!("Error: Tool {tool_name} is not allowed for subagent {name}")
+                    };
+                    messages.push(json!({
+                        "role": "tool",
+                        "tool_call_id": call.get("id").and_then(Value::as_str).unwrap_or(""),
+                        "name": tool_name,
+                        "content": result,
+                    }));
+                }
+            }
+            bail!("Subagent {name} exceeded the limit of {max_steps} model calls")
+        })
+    }
+
+    fn available_tools(&self, include_subagents: bool) -> Value {
+        let mut tools = tool_definitions(self.web.search_tool_definition());
+        let definitions = tools
+            .as_array_mut()
+            .expect("built-in tool definitions are an array");
+        definitions.extend(self.mcp.tool_definitions());
+        if include_subagents && !self.options.agents.is_empty() {
+            definitions.push(subagents::tool_definition(&self.options.agents));
+        }
+        tools
+    }
+
     async fn execute_tool(&mut self, call: &Value) -> String {
         let name = call
             .get("function")
@@ -499,6 +599,13 @@ impl Agent {
             bail!("Tool call blocked: {reason}");
         }
         let result = match name {
+            "run_subagent" => {
+                self.run_subagent(
+                    required_string(arguments, "name")?,
+                    required_string(arguments, "prompt")?,
+                )
+                .await
+            }
             "list_files" => self
                 .workspace
                 .list_files(optional_string(arguments, "path", ".")?),

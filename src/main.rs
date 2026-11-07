@@ -5,6 +5,7 @@ mod hooks;
 mod mcp;
 mod plugins;
 mod session;
+mod subagents;
 mod tasks;
 mod tools;
 mod ui;
@@ -205,6 +206,12 @@ async fn run() -> Result<()> {
             bail!("MCP server {name} is defined by both configuration and a plugin");
         }
     }
+    for (name, subagent) in plugins.agents.clone() {
+        if config.agents.insert(name.clone(), subagent).is_some() {
+            bail!("Subagent {name} is defined by both configuration and a plugin");
+        }
+    }
+    subagents::validate(&config.agents)?;
     config.hooks.extend(plugins.hooks.clone());
     let mcp = McpManager::connect(config.mcp, &workspace_root).await?;
     let mut agent = Agent::new(
@@ -218,6 +225,7 @@ async fn run() -> Result<()> {
             max_steps,
             context_window,
             auto_compact,
+            agents: config.agents,
         },
     )?;
     let history_path = sessions_dir
@@ -373,7 +381,7 @@ async fn handle_command(
             result.exit = true;
         }
         "/help" => result.line(
-            "Commands:\n  /help                 Show commands\n  /new                  Start a new session\n  /sessions             List saved sessions\n  /resume <id>          Resume a session in this workspace\n  /delete <id>          Delete a saved session\n  /clear                Clear current conversation\n  /compact              Compact current conversation\n  /usage                Show estimated context usage\n  /models               Browse and select models\n  /model [id]           Show or change the model\n  /effort [value]       Show, set, or use default reasoning effort\n  /mcp                  Show connected MCP servers and tool counts\n  /hooks                Show configured lifecycle hooks\n  /plugins              Show loaded plugins\n  /permissions [mode]   Show or set ask, auto-edit, or auto\n  /exit                 Save and exit",
+            "Commands:\n  /help                 Show commands\n  /new                  Start a new session\n  /sessions             List saved sessions\n  /resume <id>          Resume a session in this workspace\n  /delete <id>          Delete a saved session\n  /clear                Clear current conversation\n  /compact              Compact current conversation\n  /usage                Show estimated context usage\n  /models               Browse and select models\n  /model [id]           Show or change the model\n  /effort [value]       Show, set, or use default reasoning effort\n  /mcp                  Show connected MCP servers and tool counts\n  /hooks                Show configured lifecycle hooks\n  /plugins              Show loaded plugins\n  /agents               Show configured subagents\n  /permissions [mode]   Show or set ask, auto-edit, or auto\n  /exit                 Save and exit",
         ),
         "/new" => {
             save_session(store, session, agent)?;
@@ -477,6 +485,11 @@ async fn handle_command(
         }
         "/plugins" => {
             for status in agent.plugin_status() {
+                result.line(status);
+            }
+        }
+        "/agents" => {
+            for status in agent.subagent_status() {
                 result.line(status);
             }
         }
@@ -730,6 +743,7 @@ const SLASH_COMMANDS: &[&str] = &[
     "/mcp",
     "/hooks",
     "/plugins",
+    "/agents",
     "/permissions",
     "/exit",
     "/quit",

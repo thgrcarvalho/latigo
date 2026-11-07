@@ -7,6 +7,7 @@ use serde::Deserialize;
 
 use crate::hooks::HooksConfig;
 use crate::mcp::McpConfig;
+use crate::subagents::SubagentConfig;
 
 #[derive(Default)]
 pub struct PluginManager {
@@ -14,6 +15,7 @@ pub struct PluginManager {
     commands: BTreeMap<String, PluginCommand>,
     pub mcp: McpConfig,
     pub hooks: HooksConfig,
+    pub agents: BTreeMap<String, SubagentConfig>,
 }
 
 pub struct PluginInfo {
@@ -41,6 +43,8 @@ struct PluginManifest {
     mcp: McpConfig,
     #[serde(default)]
     hooks: HooksConfig,
+    #[serde(default)]
+    agents: BTreeMap<String, SubagentConfig>,
 }
 
 impl PluginManager {
@@ -196,6 +200,14 @@ impl PluginManager {
                 .is_some()
             {
                 bail!("Duplicate plugin MCP server: {namespaced}");
+            }
+        }
+
+        for (agent_name, agent) in manifest.agents {
+            agent.validate(&agent_name)?;
+            let namespaced = format!("{}_{}", namespace(&name), agent_name.replace('-', "_"));
+            if self.agents.insert(namespaced.clone(), agent).is_some() {
+                bail!("Duplicate plugin subagent: {namespaced}");
             }
         }
 

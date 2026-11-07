@@ -15,7 +15,8 @@ A latigo is the strap that secures a saddle's cinch. Latigo secures the setup ar
 - Metadata-driven reasoning-effort selection with provider defaults
 - Model Context Protocol (MCP) stdio servers with dynamic tool discovery
 - Lifecycle hooks with tool matchers, blocking decisions, and context injection
-- Trusted plugin manifests that contribute commands, hooks, and MCP servers
+- Trusted plugin manifests that contribute commands, hooks, MCP servers, and subagents
+- Isolated subagents with configurable instructions, models, and tool restrictions
 - Context-window discovery and automatic or manual compaction
 - Text and image attachments
 - Workspace file search, reading, writing, and patching
@@ -150,6 +151,7 @@ Run `latigo --help` for all command-line options.
 /mcp                  Show connected MCP servers and tool counts
 /hooks                Show configured lifecycle hooks
 /plugins              Show loaded plugins and custom commands
+/agents               Show configured subagents and tool restrictions
 /permissions [mode]   Show or set ask, auto-edit, or auto
 /exit                 Save and exit
 /quit                 Alias for /exit
@@ -179,7 +181,7 @@ Images are limited to 10 MB and 8000 by 8000 pixels. File references are whitesp
 
 ## Built-in tools
 
-Latigo exposes 13 tools to the model:
+Latigo exposes 13 core tools to the model:
 
 - `list_files`: list workspace files
 - `search_files`: find files by name or glob pattern
@@ -194,6 +196,7 @@ Latigo exposes 13 tools to the model:
 - `task_output`: read a task's output
 - `task_stop`: stop a task's process group
 - `wait_for`: wait for a background task to finish
+- `run_subagent`: delegate to a configured subagent when at least one is configured
 
 File tools are restricted to the selected workspace. Commands run in the workspace directory.
 
@@ -281,6 +284,11 @@ description = "Project-specific agent extensions"
 description = "Review the requested files"
 prompt = "Review $ARGUMENTS for correctness and regressions."
 
+[agents.reviewer]
+description = "Read-only code reviewer"
+prompt = "Find concrete correctness and regression risks."
+tools = ["read_file", "search_*"]
+
 [[hooks.session_start]]
 command = "./hooks/session-start.sh"
 
@@ -289,7 +297,25 @@ command = "./mcp-server"
 args = ["--stdio"]
 ```
 
-Custom command arguments replace `$ARGUMENTS` or `{{input}}`. If the template has neither placeholder, nonempty arguments are appended. Built-in commands cannot be overridden. Plugin MCP server names are namespaced with the plugin name, and plugin hooks default to running in the plugin directory. Both MCP servers and hooks can execute arbitrary programs, so install only trusted plugins. Use `/plugins` to list loaded plugins and custom commands.
+Custom command arguments replace `$ARGUMENTS` or `{{input}}`. If the template has neither placeholder, nonempty arguments are appended. Built-in commands cannot be overridden. Plugin MCP server and subagent names are namespaced with the plugin name, and plugin hooks default to running in the plugin directory. Both MCP servers and hooks can execute arbitrary programs, so install only trusted plugins. Use `/plugins` to list loaded plugins and custom commands.
+
+## Subagents
+
+Configure named subagents in `config.toml` or a plugin manifest:
+
+```toml
+[agents.reviewer]
+description = "Read-only code reviewer"
+prompt = "Review the delegated code for correctness and regressions. Return concrete findings."
+model = "k3.1-pro"
+reasoning_effort = "low"
+tools = ["read_file", "search_*", "list_files"]
+max_steps = 8
+```
+
+The parent model can call `run_subagent` with a subagent name and self-contained task. Each run starts with a fresh message history and returns only its final report to the parent conversation. Model and effort overrides use a separate client and do not change the parent selection. Set `reasoning_effort = "default"` to clear an inherited effort override.
+
+Default tools are read-only file/search and web-research tools. `tools` accepts exact names and glob patterns, including MCP names such as `mcp__docs__*`; use `"*"` to allow all non-delegation tools. An empty list disables tools. Nested `run_subagent` calls are always blocked. Subagents share the parent's workspace, permissions, hooks, and MCP connections, so tool restrictions are not a security sandbox. Use `/agents` to inspect configurations.
 
 ## Permissions and safety
 
@@ -346,13 +372,11 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 
-The integration tests use a reusable mock provider and cover streaming, sessions, tool calls, retries, model metadata, sensitive-file protection, background tasks, Kimi search, image attachments, MCP stdio tool calls, lifecycle hooks, and plugin extensions. Unit tests also cover plugin command expansion, hook control responses, MCP result handling, Markdown rendering, input editing and completion, tool-output expansion, and process-group shutdown.
+The integration tests use a reusable mock provider and cover streaming, sessions, tool calls, retries, model metadata, sensitive-file protection, background tasks, Kimi search, image attachments, MCP stdio tool calls, lifecycle hooks, plugin extensions, and isolated subagents. Unit tests also cover subagent tool filtering, plugin command expansion, hook control responses, MCP result handling, Markdown rendering, input editing and completion, tool-output expansion, and process-group shutdown.
 
 ## Roadmap
 
-The next planned milestone is:
-
-1. Subagents
+The initial roadmap is complete: MCP, hooks, plugins, and subagents are implemented. Further milestones will be selected from established CLI-agent workflows and documented with the corresponding changes.
 
 ## Project status
 

@@ -905,3 +905,75 @@ command = "./extension.sh"
     );
     assert!(requests[1].body.to_string().contains("plugin MCP result"));
 }
+
+#[test]
+fn runs_isolated_subagents_with_model_and_tool_overrides() {
+    let provider = MockProvider::start(vec![
+        MockResponse::tool_call(
+            "delegate",
+            "run_subagent",
+            json!({"name": "reviewer", "prompt": "Review delegated-file.txt"}),
+        ),
+        MockResponse::tool_call(
+            "subagent-read",
+            "read_file",
+            json!({"path": "delegated-file.txt"}),
+        ),
+        MockResponse::text("Subagent final report"),
+        MockResponse::text("Parent received the report"),
+    ]);
+    let project = TestProject::new(&provider);
+    fs::write(
+        project.workspace.join("delegated-file.txt"),
+        "delegated file contents",
+    )
+    .unwrap();
+    project.write_config(
+        &provider.base_url,
+        r#"[agents.reviewer]
+description = "Read-only reviewer"
+prompt = "Review files carefully."
+model = "subagent-model"
+reasoning_effort = "low"
+tools = ["read_file"]
+max_steps = 3
+"#,
+    );
+
+    let output = project.run("Delegate this task\n/agents\n/exit\n");
+    assert!(stdout(&output).contains("Parent received the report"));
+    assert!(stdout(&output).contains("reviewer: Read-only reviewer"));
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 4);
+    assert_eq!(requests[0].body["model"], "mock-model");
+    assert!(
+        requests[0].body["tools"]
+            .to_string()
+            .contains("run_subagent")
+    );
+    assert_eq!(requests[1].body["model"], "subagent-model");
+    assert_eq!(requests[1].body["reasoning_effort"], "low");
+    assert!(
+        requests[1]
+            .body
+            .to_string()
+            .contains("Review files carefully")
+    );
+    assert!(!requests[1].body.to_string().contains("Delegate this task"));
+    let subagent_tools = requests[1].body["tools"].as_array().unwrap();
+    assert_eq!(subagent_tools.len(), 1);
+    assert_eq!(subagent_tools[0]["function"]["name"], "read_file");
+    assert!(
+        requests[2]
+            .body
+            .to_string()
+            .contains("delegated file contents")
+    );
+    assert_eq!(requests[3].body["model"], "mock-model");
+    assert!(
+        requests[3]
+            .body
+            .to_string()
+            .contains("Subagent final report")
+    );
+}

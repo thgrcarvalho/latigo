@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -26,6 +27,7 @@ pub struct AppConfig {
     pub web_research: WebResearchConfig,
     pub mcp: McpConfig,
     pub hooks: HooksConfig,
+    pub agents: BTreeMap<String, crate::subagents::SubagentConfig>,
     pub retry: RetryConfig,
 }
 
