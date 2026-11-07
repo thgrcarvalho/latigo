@@ -438,6 +438,45 @@ fn refreshes_discovered_context_window_when_model_changes() {
 }
 
 #[test]
+fn sends_configured_reasoning_effort() {
+    let provider = MockProvider::start(vec![MockResponse::text("Configured")]);
+    let project = TestProject::new(&provider);
+    let config = fs::read_to_string(&project.config).unwrap().replace(
+        "model = \"mock-model\"",
+        "model = \"mock-model\"\nreasoning_effort = \"configured\"",
+    );
+    fs::write(&project.config, config).unwrap();
+    let output = project.run("Use configured effort\n/exit\n");
+    assert!(stdout(&output).contains("Configured"));
+    assert_eq!(
+        provider.requests()[0].body["reasoning_effort"],
+        "configured"
+    );
+}
+
+#[test]
+fn restores_and_clears_reasoning_effort() {
+    let provider = MockProvider::start(vec![
+        MockResponse::text("First"),
+        MockResponse::text("Second"),
+        MockResponse::text("Third"),
+    ]);
+    let project = TestProject::new(&provider);
+    project.run("/effort future\nFirst\n/exit\n");
+    let session: Value =
+        serde_json::from_str(&fs::read_to_string(&project.session_files()[0]).unwrap()).unwrap();
+    assert_eq!(session["reasoning_effort"], "future");
+    let id = session["id"].as_str().unwrap();
+
+    project.run(&format!("/resume {id}\nSecond\n/exit\n"));
+    project.run(&format!("/resume {id}\n/effort default\nThird\n/exit\n"));
+    let requests = provider.requests();
+    assert_eq!(requests[0].body["reasoning_effort"], "future");
+    assert_eq!(requests[1].body["reasoning_effort"], "future");
+    assert!(requests[2].body.get("reasoning_effort").is_none());
+}
+
+#[test]
 fn blocks_sensitive_files_without_sending_their_contents() {
     let provider = MockProvider::start(vec![
         MockResponse::tool_call("read", "read_file", json!({"path": ".env"})),

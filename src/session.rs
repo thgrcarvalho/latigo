@@ -12,6 +12,8 @@ pub struct Session {
     pub id: String,
     pub title: String,
     pub model: String,
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
     pub workspace: PathBuf,
     pub messages: Vec<Value>,
     pub created_at: DateTime<Utc>,
@@ -19,12 +21,18 @@ pub struct Session {
 }
 
 impl Session {
-    pub fn new(model: String, workspace: PathBuf, messages: Vec<Value>) -> Self {
+    pub fn new(
+        model: String,
+        reasoning_effort: Option<String>,
+        workspace: PathBuf,
+        messages: Vec<Value>,
+    ) -> Self {
         let now = Utc::now();
         Self {
             id: Uuid::new_v4().to_string(),
             title: String::new(),
             model,
+            reasoning_effort,
             workspace,
             messages,
             created_at: now,

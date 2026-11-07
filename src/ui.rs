@@ -39,6 +39,7 @@ struct UiState {
     entries: Vec<ConversationEntry>,
     input: InputState,
     model: String,
+    effort: String,
     session: String,
     permissions: String,
     context: String,
@@ -49,10 +50,17 @@ struct UiState {
     page_size: usize,
     approval: Option<String>,
     model_picker: Option<ModelPicker>,
+    effort_picker: Option<EffortPicker>,
 }
 
 struct ModelPicker {
     models: Vec<ModelInfo>,
+    selected: usize,
+}
+
+struct EffortPicker {
+    efforts: Vec<String>,
+    default_effort: Option<String>,
     selected: usize,
 }
 
@@ -153,6 +161,15 @@ impl Interface {
                         discover_context_window,
                     )
                     .await
+                } else if prompt == "/effort" {
+                    self.run_effort_picker(
+                        agent,
+                        store,
+                        session,
+                        workspace_root,
+                        discover_context_window,
+                    )
+                    .await
                 } else {
                     self.run_command(
                         &prompt,
@@ -205,6 +222,7 @@ impl Interface {
         {
             let mut core = self.core.borrow_mut();
             core.state.model = agent.model().to_string();
+            core.state.effort = agent.reasoning_effort().unwrap_or("default").to_string();
             core.state.session = session.short_id().to_string();
             core.state.permissions = agent.permission_mode().to_string();
             core.state.context = format!(
@@ -544,6 +562,141 @@ impl Interface {
         }
     }
 
+    async fn run_effort_picker(
+        &self,
+        agent: &mut Agent,
+        store: &SessionStore,
+        session: &mut Session,
+        workspace_root: &Path,
+        discover_context_window: bool,
+    ) -> Option<Result<crate::CommandResult>> {
+        self.push_entry(ConversationEntry::User("/effort".to_string()));
+        self.core.borrow_mut().state.working = true;
+        let outcome = {
+            let future = agent.list_models();
+            tokio::pin!(future);
+            loop {
+                tokio::select! {
+                    result = &mut future => break Some(result),
+                    _ = tokio::time::sleep(Duration::from_millis(50)) => {
+                        if self.poll_work_events().unwrap_or(true) {
+                            break None;
+                        }
+                        let _ = self.core.borrow_mut().draw();
+                    }
+                }
+            }
+        };
+        self.core.borrow_mut().state.working = false;
+        let models = match outcome {
+            Some(Ok(models)) => models,
+            Some(Err(error)) => return Some(Err(error)),
+            None => {
+                return Some(Ok(crate::CommandResult {
+                    output: "Effort selection canceled.\n".to_string(),
+                    ..crate::CommandResult::default()
+                }));
+            }
+        };
+        let effort = models
+            .into_iter()
+            .find(|model| model.id == agent.model())
+            .and_then(|model| model.reasoning_effort);
+        let Some(effort) = effort else {
+            return Some(Ok(crate::CommandResult {
+                output: format!(
+                    "Model {} does not expose adjustable-effort metadata. Use /effort <value> to pass a provider-specific value.\n",
+                    agent.model()
+                ),
+                ..crate::CommandResult::default()
+            }));
+        };
+        if effort.valid.is_empty() {
+            return Some(Ok(crate::CommandResult {
+                output: format!(
+                    "Model {} does not expose adjustable-effort options. Use /effort <value> to pass a provider-specific value.\n",
+                    agent.model()
+                ),
+                ..crate::CommandResult::default()
+            }));
+        }
+        let selected = agent
+            .reasoning_effort()
+            .and_then(|current| effort.valid.iter().position(|value| value == current))
+            .map(|index| index + 1)
+            .unwrap_or(0);
+        self.core.borrow_mut().state.effort_picker = Some(EffortPicker {
+            efforts: effort.valid,
+            default_effort: effort.default,
+            selected,
+        });
+        match self.read_effort_picker() {
+            Ok(Some(effort)) => {
+                let command = effort.map_or_else(
+                    || "/effort default".to_string(),
+                    |effort| format!("/effort {effort}"),
+                );
+                self.run_command(
+                    &command,
+                    agent,
+                    store,
+                    session,
+                    workspace_root,
+                    discover_context_window,
+                )
+                .await
+            }
+            Ok(None) => Some(Ok(crate::CommandResult {
+                output: "Effort selection canceled.\n".to_string(),
+                ..crate::CommandResult::default()
+            })),
+            Err(error) => Some(Err(error)),
+        }
+    }
+
+    fn read_effort_picker(&self) -> Result<Option<Option<String>>> {
+        loop {
+            self.core.borrow_mut().draw()?;
+            if let Event::Key(key) = event::read()?
+                && is_key_press(key)
+            {
+                if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c')
+                    || key.code == KeyCode::Esc
+                {
+                    self.core.borrow_mut().state.effort_picker = None;
+                    return Ok(None);
+                }
+                let mut core = self.core.borrow_mut();
+                let Some(picker) = core.state.effort_picker.as_mut() else {
+                    return Ok(None);
+                };
+                let option_count = picker.efforts.len() + 1;
+                match key.code {
+                    KeyCode::Up => {
+                        picker.selected = if picker.selected == 0 {
+                            option_count - 1
+                        } else {
+                            picker.selected - 1
+                        };
+                    }
+                    KeyCode::Down => picker.selected = (picker.selected + 1) % option_count,
+                    KeyCode::Home => picker.selected = 0,
+                    KeyCode::End => picker.selected = option_count - 1,
+                    KeyCode::Enter => {
+                        let effort = if picker.selected == 0 {
+                            None
+                        } else {
+                            Some(picker.efforts[picker.selected - 1].clone())
+                        };
+                        core.state.effort_picker = None;
+                        return Ok(Some(effort));
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
     async fn run_command(
         &self,
         prompt: &str,
@@ -659,8 +812,8 @@ fn draw_frame(frame: &mut Frame, state: &UiState) {
         Paragraph::new(Line::from(vec![
             Span::styled("Latigo", Style::default().add_modifier(Modifier::BOLD)),
             Span::raw(format!(
-                " | {} | session {} | {} | {} | {}",
-                state.model, state.session, state.permissions, state.context, status
+                " | {} | effort {} | session {} | {} | {} | {}",
+                state.model, state.effort, state.session, state.permissions, state.context, status
             )),
         ])),
         chunks[0],
@@ -687,7 +840,11 @@ fn draw_frame(frame: &mut Frame, state: &UiState) {
     .block(input_block)
     .scroll((0, horizontal_scroll as u16));
     frame.render_widget(input, chunks[2]);
-    if !state.working && state.approval.is_none() && state.model_picker.is_none() {
+    if !state.working
+        && state.approval.is_none()
+        && state.model_picker.is_none()
+        && state.effort_picker.is_none()
+    {
         let cursor_x = input_inner.x as usize + 2 + cursor_width - horizontal_scroll;
         frame.set_cursor_position((cursor_x as u16, input_inner.y));
     }
@@ -718,6 +875,17 @@ fn draw_frame(frame: &mut Frame, state: &UiState) {
             .title("Select model · ↑/↓ move · Enter select · Esc cancel");
         let inner = block.inner(area);
         let lines = model_picker_lines(picker, &state.model, inner.height as usize);
+        frame.render_widget(Clear, area);
+        frame.render_widget(block, area);
+        frame.render_widget(Paragraph::new(lines), inner);
+    }
+    if let Some(picker) = &state.effort_picker {
+        let area = centered_rect(70, 50, frame.area());
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title("Select reasoning effort · ↑/↓ move · Enter select · Esc cancel");
+        let inner = block.inner(area);
+        let lines = effort_picker_lines(picker, inner.height as usize);
         frame.render_widget(Clear, area);
         frame.render_widget(block, area);
         frame.render_widget(Paragraph::new(lines), inner);
@@ -764,6 +932,38 @@ fn model_picker_lines(
                 Style::default()
             };
             Line::styled(format!("{selector} {current} {name}{context}"), style)
+        })
+        .collect()
+}
+
+fn effort_picker_lines(picker: &EffortPicker, visible_height: usize) -> Vec<Line<'static>> {
+    let visible_height = visible_height.max(1);
+    let start = picker
+        .selected
+        .saturating_add(1)
+        .saturating_sub(visible_height);
+    (0..=picker.efforts.len())
+        .skip(start)
+        .take(visible_height)
+        .map(|index| {
+            let label = if index == 0 {
+                match &picker.default_effort {
+                    Some(default) => format!("Provider default ({default})"),
+                    None => "Provider default".to_string(),
+                }
+            } else {
+                picker.efforts[index - 1].clone()
+            };
+            let style = if index == picker.selected {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            let selector = if index == picker.selected { ">" } else { " " };
+            Line::styled(format!("{selector} {label}"), style)
         })
         .collect()
 }
@@ -1161,12 +1361,14 @@ mod tests {
                 display_name: "First".to_string(),
                 context_length: Some(1000),
                 supports_image_in: None,
+                reasoning_effort: None,
             },
             ModelInfo {
                 id: "second".to_string(),
                 display_name: "Second".to_string(),
                 context_length: Some(2000),
                 supports_image_in: None,
+                reasoning_effort: None,
             },
         ];
         let picker = ModelPicker {
@@ -1183,6 +1385,22 @@ mod tests {
         let scrolled = model_picker_lines(&picker, "second", 1);
         assert_eq!(scrolled.len(), 1);
         assert!(scrolled[0].spans[0].content.contains("Second"));
+    }
+
+    #[test]
+    fn effort_picker_uses_provider_supplied_values() {
+        let picker = EffortPicker {
+            efforts: vec!["low".to_string(), "future".to_string()],
+            default_effort: Some("future".to_string()),
+            selected: 2,
+        };
+        let lines = effort_picker_lines(&picker, 3);
+        assert_eq!(
+            lines[0].spans[0].content.as_ref(),
+            "  Provider default (future)"
+        );
+        assert_eq!(lines[2].spans[0].content.as_ref(), "> future");
+        assert_eq!(lines[2].style.bg, Some(Color::Cyan));
     }
 
     #[test]

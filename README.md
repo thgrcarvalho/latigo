@@ -12,6 +12,7 @@ A latigo is the strap that secures a saddle's cinch. Latigo secures the setup ar
 - Persistent sessions with workspace-specific resume
 - Input history and slash-command completion
 - Model listing and model switching
+- Metadata-driven reasoning-effort selection with provider defaults
 - Context-window discovery and automatic or manual compaction
 - Text and image attachments
 - Workspace file search, reading, writing, and patching
@@ -87,6 +88,7 @@ max_steps = 20
 permission_mode = "ask"
 auto_compact = true
 # context_window = 262144
+# reasoning_effort = "high"
 
 [commands]
 allow = []
@@ -114,6 +116,7 @@ Supported environment variables include:
 - `OPENAI_BASE_URL`: default provider base URL
 - `AGENT_MAX_STEPS`: maximum model calls per prompt
 - `AGENT_CONTEXT_WINDOW`: context-window override
+- `AGENT_REASONING_EFFORT`: provider reasoning-effort value
 - `AGENT_AUTO_COMPACT`: enable or disable automatic compaction
 - `AGENT_PERMISSION_MODE`: `ask`, `auto-edit`, or `auto`
 - `AGENT_SESSIONS_DIR`: session storage directory
@@ -121,6 +124,8 @@ Supported environment variables include:
 The API credential variable is selected separately with `--api-key-env`; it defaults to `OPENAI_API_KEY`.
 
 If `context_window` is omitted, Latigo tries to discover it from the provider's model metadata at startup and after `/model` changes. An explicit override remains fixed. If discovery fails, Latigo keeps the previous limit and reports a warning.
+
+Reasoning effort can be set with `--effort`, `AGENT_REASONING_EFFORT`, or `reasoning_effort` in `config.toml`. If none is set, Latigo omits the request field and uses the provider's default.
 
 Run `latigo --help` for all command-line options.
 
@@ -137,6 +142,8 @@ Run `latigo --help` for all command-line options.
 /usage                Show estimated context usage
 /models               Browse and select available models
 /model [id]           Show or directly change the model
+/effort [value]       Show or set a provider-specific reasoning effort
+/effort default       Use the provider's default reasoning effort
 /permissions [mode]   Show or set ask, auto-edit, or auto
 /exit                 Save and exit
 /quit                 Alias for /exit
@@ -144,7 +151,7 @@ Run `latigo --help` for all command-line options.
 
 Interactive terminals use a full-screen Ratatui interface. Non-interactive runs and `TERM=dumb` retain the line-oriented interface.
 
-Use the up and down arrows to navigate input history and Tab to complete slash commands. In the Ratatui interface, `/models` opens a model picker: use Up/Down to move, Enter to select, and Escape to cancel. PageUp and PageDown scroll through conversation history, and Ctrl-T expands or collapses tool output. Ctrl-C cancels active model work; at the prompt, Ctrl-C saves the session and exits. Approval dialogs accept `y` and reject with `n`, Enter, or Escape.
+Use the up and down arrows to navigate input history and Tab to complete slash commands. In the Ratatui interface, `/models` and `/effort` open pickers: use Up/Down to move, Enter to select, and Escape to cancel. Effort choices and defaults come from the current model's metadata rather than a hardcoded list. Direct `/effort <value>` input remains available for provider-specific values. PageUp and PageDown scroll through conversation history, and Ctrl-T expands or collapses tool output. Ctrl-C cancels active model work; at the prompt, Ctrl-C saves the session and exits. Approval dialogs accept `y` and reject with `n`, Enter, or Escape.
 
 Sessions are stored in `~/.latigo/sessions` by default. Input history and background-task data are stored alongside them under `~/.latigo`.
 

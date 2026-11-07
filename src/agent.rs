@@ -77,6 +77,14 @@ impl Agent {
         self.image_support = None;
     }
 
+    pub fn reasoning_effort(&self) -> Option<&str> {
+        self.client.reasoning_effort()
+    }
+
+    pub fn set_reasoning_effort(&mut self, effort: Option<String>) {
+        self.client.set_reasoning_effort(effort);
+    }
+
     pub async fn refresh_context_window(&mut self) -> Result<Option<usize>> {
         let context_window = self.client.model_context_window().await?;
         if let Some(value) = context_window.filter(|value| *value > 0) {

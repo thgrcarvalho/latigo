@@ -13,6 +13,7 @@ use crate::web::WebResearchConfig;
 pub struct AppConfig {
     pub model: Option<String>,
     pub base_url: Option<String>,
+    pub reasoning_effort: Option<String>,
     pub max_steps: Option<usize>,
     pub context_window: Option<usize>,
     pub auto_compact: Option<bool>,

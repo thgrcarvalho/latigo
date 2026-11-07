@@ -47,6 +47,9 @@ struct Args {
     #[arg(long, help = "Model ID (overrides OPENAI_MODEL and config)")]
     model: Option<String>,
 
+    #[arg(long, help = "Provider reasoning-effort value")]
+    effort: Option<String>,
+
     #[arg(long, help = "OpenAI-compatible base URL")]
     base_url: Option<String>,
 
@@ -100,6 +103,14 @@ async fn run() -> Result<()> {
         .or_else(|| env::var("OPENAI_BASE_URL").ok())
         .or(config.base_url)
         .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
+    let reasoning_effort = args
+        .effort
+        .or_else(|| env::var("AGENT_REASONING_EFFORT").ok())
+        .or(config.reasoning_effort)
+        .map(|effort| effort.trim().to_string());
+    if reasoning_effort.as_deref() == Some("") {
+        bail!("reasoning_effort cannot be empty");
+    }
     let max_steps = args
         .max_steps
         .or(env_usize("AGENT_MAX_STEPS")?)
@@ -138,7 +149,8 @@ async fn run() -> Result<()> {
         bail!("context_window must be at least 1");
     }
 
-    let client = OpenAICompatibleClient::new(&base_url, api_key, model, config.retry)?;
+    let client =
+        OpenAICompatibleClient::new(&base_url, api_key, model, reasoning_effort, config.retry)?;
     let context_window = match context_window_override {
         Some(value) => value,
         None => match client.model_context_window().await {
@@ -193,6 +205,7 @@ async fn run() -> Result<()> {
     let store = SessionStore::new(sessions_dir);
     let mut session = Session::new(
         agent.model().to_string(),
+        agent.reasoning_effort().map(ToString::to_string),
         workspace_root.clone(),
         agent.messages().to_vec(),
     );
@@ -318,13 +331,14 @@ async fn handle_command(
             result.exit = true;
         }
         "/help" => result.line(
-            "Commands:\n  /help                 Show commands\n  /new                  Start a new session\n  /sessions             List saved sessions\n  /resume <id>          Resume a session in this workspace\n  /delete <id>          Delete a saved session\n  /clear                Clear current conversation\n  /compact              Compact current conversation\n  /usage                Show estimated context usage\n  /models               List available models\n  /model [id]           Show or change the model\n  /permissions [mode]   Show or set ask, auto-edit, or auto\n  /exit                 Save and exit",
+            "Commands:\n  /help                 Show commands\n  /new                  Start a new session\n  /sessions             List saved sessions\n  /resume <id>          Resume a session in this workspace\n  /delete <id>          Delete a saved session\n  /clear                Clear current conversation\n  /compact              Compact current conversation\n  /usage                Show estimated context usage\n  /models               Browse and select models\n  /model [id]           Show or change the model\n  /effort [value]       Show, set, or use default reasoning effort\n  /permissions [mode]   Show or set ask, auto-edit, or auto\n  /exit                 Save and exit",
         ),
         "/new" => {
             save_session(store, session, agent)?;
             agent.clear();
             *session = Session::new(
                 agent.model().to_string(),
+                agent.reasoning_effort().map(ToString::to_string),
                 workspace_root.to_path_buf(),
                 agent.messages().to_vec(),
             );
@@ -359,6 +373,7 @@ async fn handle_command(
                 );
             }
             agent.set_model(loaded.model.clone());
+            agent.set_reasoning_effort(loaded.reasoning_effort.clone());
             agent.restore_messages(loaded.messages.clone())?;
             result.line(format!(
                 "Resumed session {} | {}",
@@ -377,6 +392,7 @@ async fn handle_command(
                 agent.clear();
                 *session = Session::new(
                     agent.model().to_string(),
+                agent.reasoning_effort().map(ToString::to_string),
                     workspace_root.to_path_buf(),
                     agent.messages().to_vec(),
                 );
@@ -434,6 +450,23 @@ async fn handle_command(
                             agent.context_window()
                         )),
                     }
+                }
+                save_session(store, session, agent)?;
+            }
+        }
+        "/effort" => {
+            if argument.is_empty() {
+                match agent.reasoning_effort() {
+                    Some(effort) => result.line(format!("Reasoning effort: {effort}")),
+                    None => result.line("Reasoning effort: provider default"),
+                }
+            } else {
+                if argument == "default" {
+                    agent.set_reasoning_effort(None);
+                    result.line("Reasoning effort changed to provider default");
+                } else {
+                    agent.set_reasoning_effort(Some(argument.to_string()));
+                    result.line(format!("Reasoning effort changed to {argument}"));
                 }
                 save_session(store, session, agent)?;
             }
@@ -526,6 +559,7 @@ async fn run_compaction(agent: &mut Agent) -> Result<String> {
 fn save_session(store: &SessionStore, session: &mut Session, agent: &Agent) -> Result<()> {
     session.messages = agent.messages().to_vec();
     session.model = agent.model().to_string();
+    session.reasoning_effort = agent.reasoning_effort().map(ToString::to_string);
     session.updated_at = Utc::now();
     if session.title.is_empty()
         && let Some(title) = agent.messages().iter().find_map(|message| {
@@ -628,6 +662,7 @@ const SLASH_COMMANDS: &[&str] = &[
     "/usage",
     "/models",
     "/model",
+    "/effort",
     "/permissions",
     "/exit",
     "/quit",

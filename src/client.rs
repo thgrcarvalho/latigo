@@ -52,11 +52,17 @@ impl RetryConfig {
     }
 }
 
+pub struct ReasoningEffortInfo {
+    pub valid: Vec<String>,
+    pub default: Option<String>,
+}
+
 pub struct ModelInfo {
     pub id: String,
     pub display_name: String,
     pub context_length: Option<usize>,
     pub supports_image_in: Option<bool>,
+    pub reasoning_effort: Option<ReasoningEffortInfo>,
 }
 
 #[derive(Clone)]
@@ -67,11 +73,18 @@ pub struct OpenAICompatibleClient {
     search_endpoint: String,
     api_key: String,
     model: String,
+    reasoning_effort: Option<String>,
     retry: RetryConfig,
 }
 
 impl OpenAICompatibleClient {
-    pub fn new(base_url: &str, api_key: String, model: String, retry: RetryConfig) -> Result<Self> {
+    pub fn new(
+        base_url: &str,
+        api_key: String,
+        model: String,
+        reasoning_effort: Option<String>,
+        retry: RetryConfig,
+    ) -> Result<Self> {
         retry.validate()?;
         let client = Client::builder()
             .connect_timeout(Duration::from_secs(30))
@@ -84,6 +97,7 @@ impl OpenAICompatibleClient {
             search_endpoint: format!("{base_url}/search"),
             api_key,
             model,
+            reasoning_effort,
             retry,
         })
     }
@@ -94,6 +108,14 @@ impl OpenAICompatibleClient {
 
     pub fn set_model(&mut self, model: String) {
         self.model = model;
+    }
+
+    pub fn reasoning_effort(&self) -> Option<&str> {
+        self.reasoning_effort.as_deref()
+    }
+
+    pub fn set_reasoning_effort(&mut self, effort: Option<String>) {
+        self.reasoning_effort = effort;
     }
 
     pub async fn list_models(&self) -> Result<Vec<ModelInfo>> {
@@ -151,6 +173,7 @@ impl OpenAICompatibleClient {
                     display_name: display_name.to_string(),
                     context_length,
                     supports_image_in,
+                    reasoning_effort: reasoning_effort_info(entry),
                 })
             })
             .collect::<Vec<_>>();
@@ -209,12 +232,19 @@ impl OpenAICompatibleClient {
         serde_json::from_str(&body).context("Kimi search returned invalid JSON")
     }
 
+    fn with_reasoning_effort(&self, mut payload: Value) -> Value {
+        if let Some(effort) = &self.reasoning_effort {
+            payload["reasoning_effort"] = json!(effort);
+        }
+        payload
+    }
+
     pub async fn complete(&self, messages: &[Value]) -> Result<String> {
-        let payload = json!({
+        let payload = self.with_reasoning_effort(json!({
             "model": self.model,
             "messages": messages,
             "stream": false,
-        });
+        }));
         let response = self.send(&payload).await?;
         let status = response.status();
         let body = response
@@ -246,12 +276,12 @@ impl OpenAICompatibleClient {
         tools: &Value,
         on_content: &mut dyn FnMut(&str),
     ) -> Result<Value> {
-        let payload = json!({
+        let payload = self.with_reasoning_effort(json!({
             "model": self.model,
             "messages": messages,
             "tools": tools,
             "stream": true,
-        });
+        }));
         let response = self.send(&payload).await?;
         let status = response.status();
         if !status.is_success() {
@@ -383,6 +413,46 @@ impl OpenAICompatibleClient {
     }
 }
 
+fn reasoning_effort_info(entry: &Value) -> Option<ReasoningEffortInfo> {
+    entry
+        .get("reasoning")
+        .and_then(|reasoning| reasoning.get("effort"))
+        .and_then(|effort| parse_effort_info(effort, "valid", "default"))
+        .or_else(|| {
+            entry
+                .get("think_efforts")
+                .and_then(|effort| parse_effort_info(effort, "valid_efforts", "default_effort"))
+        })
+}
+
+fn parse_effort_info(
+    value: &Value,
+    valid_key: &str,
+    default_key: &str,
+) -> Option<ReasoningEffortInfo> {
+    let valid = value
+        .get(valid_key)
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let default = value
+        .get(default_key)
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string);
+    if valid.is_empty() && default.is_none() {
+        return None;
+    }
+    Some(ReasoningEffortInfo { valid, default })
+}
+
 fn is_transient_status(status: reqwest::StatusCode) -> bool {
     status.as_u16() == 408 || status.as_u16() == 429 || status.is_server_error()
 }
@@ -502,4 +572,35 @@ fn find_event_end(buffer: &[u8]) -> Option<(usize, usize)> {
                 .position(|window| window == b"\n\n")
                 .map(|position| (position, 2))
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_reasoning_effort_metadata_and_fallback() {
+        let current = reasoning_effort_info(&json!({
+            "reasoning": {
+                "type": "only",
+                "effort": {"valid": ["low", "future"], "default": "future"}
+            }
+        }))
+        .expect("current effort metadata");
+        assert_eq!(current.valid, ["low", "future"]);
+        assert_eq!(current.default.as_deref(), Some("future"));
+
+        let fallback = reasoning_effort_info(&json!({
+            "think_efforts": {
+                "support": true,
+                "valid_efforts": ["high", "max"],
+                "default_effort": "high"
+            }
+        }))
+        .expect("fallback effort metadata");
+        assert_eq!(fallback.valid, ["high", "max"]);
+        assert_eq!(fallback.default.as_deref(), Some("high"));
+
+        assert!(reasoning_effort_info(&json!({"reasoning": {"type": "only"}})).is_none());
+    }
 }
