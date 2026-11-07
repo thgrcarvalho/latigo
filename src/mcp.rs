@@ -37,6 +37,21 @@ impl Default for McpServerConfig {
     }
 }
 
+impl McpConfig {
+    pub fn validate(&self) -> Result<()> {
+        for (name, server) in &self.servers {
+            validate_server_name(name)?;
+            if server.command.trim().is_empty() {
+                bail!("MCP server {name} has an empty command");
+            }
+            if server.timeout_seconds == 0 {
+                bail!("MCP server {name} timeout_seconds must be at least 1");
+            }
+        }
+        Ok(())
+    }
+}
+
 pub struct McpManager {
     servers: BTreeMap<String, McpServer>,
     tools: BTreeMap<String, RemoteTool>,
@@ -55,18 +70,12 @@ struct RemoteTool {
 
 impl McpManager {
     pub async fn connect(config: McpConfig, workspace: &Path) -> Result<Self> {
+        config.validate()?;
         let mut manager = Self {
             servers: BTreeMap::new(),
             tools: BTreeMap::new(),
         };
         for (name, server_config) in config.servers {
-            validate_server_name(&name)?;
-            if server_config.command.trim().is_empty() {
-                bail!("MCP server {name} has an empty command");
-            }
-            if server_config.timeout_seconds == 0 {
-                bail!("MCP server {name} timeout_seconds must be at least 1");
-            }
             let mut client = McpClient::start(&name, &server_config, workspace)
                 .await
                 .with_context(|| format!("Could not start MCP server {name}"))?;

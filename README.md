@@ -11,6 +11,8 @@ A latigo is the strap that secures a saddle's cinch. Latigo secures the setup ar
 - Ratatui interface with scrollable history, Markdown rendering, and expandable tool output
 - OpenAI-compatible providers, including Kimi
 - Persistent sessions with workspace-specific resume
+- Hierarchical user and project `AGENTS.md` instructions
+- Runtime status and offline configuration diagnostics
 - Input history and slash-command completion
 - Model listing and model switching
 - Metadata-driven reasoning-effort selection with provider defaults
@@ -134,6 +136,24 @@ Reasoning effort can be set with `--effort`, `AGENT_REASONING_EFFORT`, or `reaso
 
 Run `latigo --help` for all command-line options.
 
+Validate configuration and trusted plugin manifests without an API key, provider request, or MCP process launch:
+
+```bash
+latigo doctor
+latigo doctor ./candidate-config.toml
+```
+
+The doctor checks command rules, retry settings, hooks, MCP declarations, plugins, and subagents. It exits nonzero on invalid or explicitly requested missing files.
+
+## Project instructions
+
+Latigo loads UTF-8 `AGENTS.md` files into the system context at startup:
+
+1. `~/.config/latigo/AGENTS.md`
+2. `AGENTS.md` and `.latigo/AGENTS.md` in each ancestor directory, ordered from the filesystem root to the workspace
+
+More specific instructions appear later. Duplicate paths and empty files are skipped, and each file is limited to 128 KiB. Instructions are context rather than hard security rules; use hooks and permission rules for enforcement. Parent and subagent contexts include the loaded instructions, and the root instructions survive compaction. Use `/status` to see exactly which files were loaded.
+
 ## Non-interactive execution
 
 Run one prompt without opening the interactive interface:
@@ -159,6 +179,7 @@ Print mode retains the configured permission mode. If an action requires approva
 /clear                Clear the current conversation
 /compact              Compact the current conversation
 /usage                Show estimated context usage
+/status               Show runtime state and loaded instruction files
 /models               Browse and select available models
 /model [id]           Show or directly change the model
 /effort [value]       Show or set a provider-specific reasoning effort
@@ -387,7 +408,7 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 
-The integration tests use a reusable mock provider and cover streaming, sessions, print-mode output formats, tool calls, retries, model metadata, sensitive-file protection, background tasks, Kimi search, image attachments, MCP stdio tool calls, lifecycle hooks, plugin extensions, and isolated subagents. Unit tests also cover subagent tool filtering, plugin command expansion, hook control responses, MCP result handling, Markdown rendering, input editing and completion, tool-output expansion, and process-group shutdown.
+The integration tests use a reusable mock provider and cover streaming, sessions, print-mode output formats, instruction loading, offline diagnostics, tool calls, retries, model metadata, sensitive-file protection, background tasks, Kimi search, image attachments, MCP stdio tool calls, lifecycle hooks, plugin extensions, and isolated subagents. Unit tests also cover instruction precedence, subagent tool filtering, plugin command expansion, hook control responses, MCP result handling, Markdown rendering, input editing and completion, tool-output expansion, and process-group shutdown.
 
 ## Roadmap
 

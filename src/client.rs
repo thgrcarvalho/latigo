@@ -29,7 +29,7 @@ impl Default for RetryConfig {
 }
 
 impl RetryConfig {
-    fn validate(&self) -> Result<()> {
+    pub fn validate(&self) -> Result<()> {
         if self.max_attempts == 0 {
             bail!("retry.max_attempts must be at least 1");
         }

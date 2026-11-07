@@ -2,6 +2,7 @@ mod agent;
 mod client;
 mod config;
 mod hooks;
+mod instructions;
 mod mcp;
 mod plugins;
 mod session;
@@ -20,7 +21,7 @@ use std::str::FromStr;
 
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
-use clap::{Parser, ValueEnum};
+use clap::{Parser, Subcommand, ValueEnum};
 use rustyline::completion::{Completer, Pair};
 use rustyline::error::ReadlineError;
 use rustyline::highlight::Highlighter;
@@ -32,6 +33,7 @@ use rustyline::{Context as ReadlineContext, Editor, Helper};
 use crate::agent::{Agent, AgentEvent, AgentOptions};
 use crate::client::OpenAICompatibleClient;
 use crate::config::AppConfig;
+use crate::instructions::InstructionSet;
 use crate::mcp::McpManager;
 use crate::plugins::PluginManager;
 use crate::session::{Session, SessionStore};
@@ -96,6 +98,15 @@ struct Args {
 
     #[arg(long, help = "Session storage directory")]
     sessions_dir: Option<PathBuf>,
+
+    #[command(subcommand)]
+    command: Option<CliCommand>,
+}
+
+#[derive(Subcommand)]
+enum CliCommand {
+    #[command(about = "Validate configuration without contacting the provider")]
+    Doctor { path: Option<PathBuf> },
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -115,6 +126,14 @@ async fn main() {
 
 async fn run() -> Result<()> {
     let args = Args::parse();
+    if let Some(CliCommand::Doctor { path }) = &args.command {
+        let required = path.is_some() || args.config.is_some();
+        let config_path = path
+            .clone()
+            .or_else(|| args.config.clone())
+            .unwrap_or(default_config_path()?);
+        return doctor(&config_path, required);
+    }
     let config_required = args.config.is_some();
     let config_path = match &args.config {
         Some(path) => path.clone(),
@@ -241,6 +260,7 @@ async fn run() -> Result<()> {
     }
     subagents::validate(&config.agents)?;
     config.hooks.extend(plugins.hooks.clone());
+    let instructions = InstructionSet::load(&workspace_root, &home_dir()?.join(".config/latigo"))?;
     let mcp = McpManager::connect(config.mcp, &workspace_root).await?;
     let mut agent = Agent::new(
         client,
@@ -254,6 +274,7 @@ async fn run() -> Result<()> {
             context_window,
             auto_compact,
             agents: config.agents,
+            instructions,
         },
     )?;
     let history_path = sessions_dir
@@ -417,7 +438,7 @@ async fn handle_command(
             result.exit = true;
         }
         "/help" => result.line(
-            "Commands:\n  /help                 Show commands\n  /new                  Start a new session\n  /sessions             List saved sessions\n  /resume <id>          Resume a session in this workspace\n  /delete <id>          Delete a saved session\n  /clear                Clear current conversation\n  /compact              Compact current conversation\n  /usage                Show estimated context usage\n  /models               Browse and select models\n  /model [id]           Show or change the model\n  /effort [value]       Show, set, or use default reasoning effort\n  /mcp                  Show connected MCP servers and tool counts\n  /hooks                Show configured lifecycle hooks\n  /plugins              Show loaded plugins\n  /agents               Show configured subagents\n  /permissions [mode]   Show or set ask, auto-edit, or auto\n  /exit                 Save and exit",
+            "Commands:\n  /help                 Show commands\n  /new                  Start a new session\n  /sessions             List saved sessions\n  /resume <id>          Resume a session in this workspace\n  /delete <id>          Delete a saved session\n  /clear                Clear current conversation\n  /compact              Compact current conversation\n  /usage                Show estimated context usage\n  /status               Show runtime and loaded instruction files\n  /models               Browse and select models\n  /model [id]           Show or change the model\n  /effort [value]       Show, set, or use default reasoning effort\n  /mcp                  Show connected MCP servers and tool counts\n  /hooks                Show configured lifecycle hooks\n  /plugins              Show loaded plugins\n  /agents               Show configured subagents\n  /permissions [mode]   Show or set ask, auto-edit, or auto\n  /exit                 Save and exit",
         ),
         "/new" => {
             save_session(store, session, agent)?;
@@ -505,6 +526,30 @@ async fn handle_command(
             agent.estimated_tokens(),
             agent.context_window()
         )),
+        "/status" => {
+            result.line(format!("Latigo: {}", env!("CARGO_PKG_VERSION")));
+            result.line(format!("Session: {}", session.id));
+            result.line(format!(
+                "Title: {}",
+                if session.title.is_empty() {
+                    "Untitled"
+                } else {
+                    &session.title
+                }
+            ));
+            result.line(format!("Model: {}", agent.model()));
+            result.line(format!("Workspace: {}", workspace_root.display()));
+            result.line(format!("Permissions: {}", agent.permission_mode()));
+            result.line(format!(
+                "Context: ~{} / {} tokens (estimated)",
+                agent.estimated_tokens(),
+                agent.context_window()
+            ));
+            result.line("Instruction files:");
+            for path in agent.instruction_status() {
+                result.line(format!("  {path}"));
+            }
+        }
         "/mcp" => {
             for status in agent.mcp_status() {
                 result.line(status);
@@ -787,6 +832,30 @@ fn message_text(message: &serde_json::Value) -> Option<&str> {
     })
 }
 
+fn doctor(config_path: &Path, required: bool) -> Result<()> {
+    let mut config = AppConfig::load(config_path, required)?;
+    let plugins = PluginManager::load(
+        &config.plugins,
+        config_path.parent().unwrap_or_else(|| Path::new(".")),
+        &home_dir()?.join(".config/latigo/plugins"),
+    )?;
+    for (name, server) in plugins.mcp.servers.clone() {
+        if config.mcp.servers.insert(name.clone(), server).is_some() {
+            bail!("MCP server {name} is defined by both configuration and a plugin");
+        }
+    }
+    for (name, subagent) in plugins.agents.clone() {
+        if config.agents.insert(name.clone(), subagent).is_some() {
+            bail!("Subagent {name} is defined by both configuration and a plugin");
+        }
+    }
+    config.hooks.extend(plugins.hooks.clone());
+    config.validate()?;
+    println!("Configuration valid: {}", config_path.display());
+    println!("Checked commands, retries, hooks, MCP, plugins, and subagents.");
+    Ok(())
+}
+
 fn home_dir() -> Result<PathBuf> {
     env::var_os("HOME")
         .or_else(|| env::var_os("USERPROFILE"))
@@ -850,6 +919,7 @@ const SLASH_COMMANDS: &[&str] = &[
     "/clear",
     "/compact",
     "/usage",
+    "/status",
     "/models",
     "/model",
     "/effort",

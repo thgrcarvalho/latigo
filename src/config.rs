@@ -6,7 +6,7 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
 use crate::client::RetryConfig;
-use crate::hooks::HooksConfig;
+use crate::hooks::{HookRunner, HooksConfig};
 use crate::mcp::McpConfig;
 use crate::tools::{CommandRules, PermissionMode};
 use crate::web::WebResearchConfig;
@@ -43,7 +43,25 @@ impl AppConfig {
             .with_context(|| format!("Could not read config file: {}", path.display()))?;
         let config: Self = toml::from_str(&content)
             .with_context(|| format!("Could not parse config file: {}", path.display()))?;
-        config.commands.validate()?;
+        config.validate()?;
         Ok(config)
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        self.commands.validate()?;
+        self.retry.validate()?;
+        self.mcp.validate()?;
+        crate::subagents::validate(&self.agents)?;
+        HookRunner::new(self.hooks.clone(), Path::new("."))?;
+        if self.max_steps == Some(0) {
+            bail!("max_steps must be at least 1");
+        }
+        if self.context_window == Some(0) {
+            bail!("context_window must be at least 1");
+        }
+        if self.reasoning_effort.as_deref().is_some_and(str::is_empty) {
+            bail!("reasoning_effort cannot be empty");
+        }
+        Ok(())
     }
 }

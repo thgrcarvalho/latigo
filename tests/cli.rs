@@ -261,6 +261,7 @@ impl TestProject {
             .arg("--sessions-dir")
             .arg(&self.sessions)
             .env("OPENAI_API_KEY", "test-key")
+            .env("HOME", &self.root)
             .env("TERM", "dumb")
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
@@ -299,6 +300,7 @@ impl TestProject {
             .arg("--output-format")
             .arg(format)
             .env("OPENAI_API_KEY", "test-key")
+            .env("HOME", &self.root)
             .env("TERM", "dumb")
             .output()
             .expect("run print mode");
@@ -1034,4 +1036,56 @@ fn print_mode_supports_text_json_and_stream_json() {
     assert_eq!(events.last().unwrap()["type"], "result");
     assert_eq!(events.last().unwrap()["response"], "Stream response");
     assert!(stderr(&stream).is_empty());
+}
+
+#[test]
+fn loads_instruction_files_and_reports_runtime_status() {
+    let provider = MockProvider::start(vec![MockResponse::text("Instructions loaded")]);
+    let project = TestProject::new(&provider);
+    let user_config = project.root.join(".config/latigo");
+    fs::create_dir_all(&user_config).unwrap();
+    fs::write(user_config.join("AGENTS.md"), "user-rule-token").unwrap();
+    fs::write(project.workspace.join("AGENTS.md"), "project-rule-token").unwrap();
+    fs::create_dir(project.workspace.join(".latigo")).unwrap();
+    fs::write(
+        project.workspace.join(".latigo/AGENTS.md"),
+        "local-rule-token",
+    )
+    .unwrap();
+
+    let output = project.run("Use instructions\n/status\n/exit\n");
+    assert!(stdout(&output).contains("Instructions loaded"));
+    assert!(stdout(&output).contains("Latigo: "));
+    assert!(stdout(&output).contains("AGENTS.md"));
+    let request = provider.requests()[0].body.to_string();
+    let user = request.find("user-rule-token").unwrap();
+    let project_rule = request.find("project-rule-token").unwrap();
+    let local = request.find("local-rule-token").unwrap();
+    assert!(user < project_rule && project_rule < local);
+}
+
+#[test]
+fn doctor_validates_configuration_without_api_key_or_provider() {
+    let provider = MockProvider::start(Vec::new());
+    let project = TestProject::new(&provider);
+    let valid = Command::new(env!("CARGO_BIN_EXE_latigo"))
+        .arg("doctor")
+        .arg(&project.config)
+        .env("HOME", &project.root)
+        .env_remove("OPENAI_API_KEY")
+        .output()
+        .unwrap();
+    assert!(valid.status.success(), "stderr: {}", stderr(&valid));
+    assert!(stdout(&valid).contains("Configuration valid"));
+    assert!(provider.requests().is_empty());
+
+    fs::write(&project.config, "model = \"mock-model\"\nmax_steps = 0\n").unwrap();
+    let invalid = Command::new(env!("CARGO_BIN_EXE_latigo"))
+        .arg("doctor")
+        .arg(&project.config)
+        .env("HOME", &project.root)
+        .output()
+        .unwrap();
+    assert!(!invalid.status.success());
+    assert!(stderr(&invalid).contains("max_steps must be at least 1"));
 }

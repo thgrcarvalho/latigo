@@ -3,6 +3,7 @@ use serde_json::{Map, Value, json};
 
 use crate::client::{ModelInfo, OpenAICompatibleClient};
 use crate::hooks::{HookEvent, HookRunner, HooksConfig};
+use crate::instructions::InstructionSet;
 use crate::mcp::McpManager;
 use crate::plugins::PluginManager;
 use crate::subagents::{self, SubagentConfig};
@@ -22,6 +23,7 @@ pub struct AgentOptions {
     pub context_window: usize,
     pub auto_compact: bool,
     pub agents: std::collections::BTreeMap<String, SubagentConfig>,
+    pub instructions: InstructionSet,
 }
 
 pub struct Agent {
@@ -50,8 +52,9 @@ impl Agent {
         let system_message = json!({
             "role": "system",
             "content": format!(
-                "You are a coding assistant running in a small CLI harness. Use the available tools when needed. The workspace is {}. Keep answers concise and report important tool results.",
-                workspace.root.display()
+                "You are a coding assistant running in a small CLI harness. Use the available tools when needed. The workspace is {}. Keep answers concise and report important tool results.{}",
+                workspace.root.display(),
+                options.instructions.system_prompt()
             ),
         });
         let hooks = HookRunner::new(hooks_config, &workspace.root)?;
@@ -138,6 +141,10 @@ impl Agent {
             .iter()
             .map(|(name, agent)| agent.status(name))
             .collect()
+    }
+
+    pub fn instruction_status(&self) -> Vec<String> {
+        self.options.instructions.status()
     }
 
     pub fn expand_plugin_command(&self, input: &str) -> Result<Option<String>> {
@@ -469,8 +476,9 @@ impl Agent {
                 json!({
                     "role": "system",
                     "content": format!(
-                        "You are the {name} subagent running in Latigo. {instructions}\nThe workspace is {}. Your conversation is isolated from the parent agent. Use only the tools exposed to you and return a final report to the parent.",
-                        self.workspace.root.display()
+                        "You are the {name} subagent running in Latigo. {instructions}\nThe workspace is {}. Your conversation is isolated from the parent agent. Use only the tools exposed to you and return a final report to the parent.{}",
+                        self.workspace.root.display(),
+                        self.options.instructions.system_prompt()
                     )
                 }),
                 json!({"role": "user", "content": prompt}),
