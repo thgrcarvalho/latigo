@@ -76,6 +76,16 @@ impl Agent {
         self.image_support = None;
     }
 
+    pub async fn refresh_context_window(&mut self) -> Result<Option<usize>> {
+        let context_window = self.client.model_context_window().await?;
+        if let Some(value) = context_window.filter(|value| *value > 0) {
+            self.context_window = value;
+            Ok(Some(value))
+        } else {
+            Ok(None)
+        }
+    }
+
     pub async fn list_models(&self) -> Result<Vec<ModelInfo>> {
         self.client.list_models().await
     }

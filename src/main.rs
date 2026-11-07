@@ -222,7 +222,16 @@ async fn run() -> Result<()> {
         }
         editor.append_history(&history_path)?;
         if prompt.starts_with('/') {
-            match handle_command(prompt, &mut agent, &store, &mut session, &workspace_root).await {
+            match handle_command(
+                prompt,
+                &mut agent,
+                &store,
+                &mut session,
+                &workspace_root,
+                context_window_override.is_none(),
+            )
+            .await
+            {
                 Ok(true) => return Ok(()),
                 Ok(false) => {}
                 Err(error) => eprintln!("Error: {error:#}"),
@@ -251,6 +260,7 @@ async fn handle_command(
     store: &SessionStore,
     session: &mut Session,
     workspace_root: &Path,
+    discover_context_window: bool,
 ) -> Result<bool> {
     let (command, argument) = input
         .split_once(char::is_whitespace)
@@ -374,8 +384,21 @@ async fn handle_command(
                 println!("Current model: {}", agent.model());
             } else {
                 agent.set_model(argument.to_string());
-                save_session(store, session, agent)?;
                 println!("Model changed to {argument}");
+                if discover_context_window {
+                    match agent.refresh_context_window().await {
+                        Ok(Some(value)) => println!("Context window: {value} tokens"),
+                        Ok(None) => eprintln!(
+                            "Could not discover the model context window; keeping {} tokens.",
+                            agent.context_window()
+                        ),
+                        Err(error) => eprintln!(
+                            "Could not discover the model context window: {error:#}; keeping {} tokens.",
+                            agent.context_window()
+                        ),
+                    }
+                }
+                save_session(store, session, agent)?;
             }
             Ok(false)
         }

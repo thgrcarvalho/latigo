@@ -119,7 +119,7 @@ Supported environment variables include:
 
 The API credential variable is selected separately with `--api-key-env`; it defaults to `OPENAI_API_KEY`.
 
-If `context_window` is omitted, Latigo tries to discover it from the provider's model metadata at startup. Discovery does not currently rerun after `/model` changes, so restart Latigo or set an explicit override when changing to a model with a different limit.
+If `context_window` is omitted, Latigo tries to discover it from the provider's model metadata at startup and after `/model` changes. An explicit override remains fixed. If discovery fails, Latigo keeps the previous limit and reports a warning.
 
 Run `latigo --help` for all command-line options.
 
@@ -247,8 +247,6 @@ The next planned milestones are:
 3. Hooks
 4. Plugins
 5. Subagents
-
-Smaller follow-ups include refreshing context-window metadata after model changes, expanding process-group regression coverage, and adding CI.
 
 ## Project status
 

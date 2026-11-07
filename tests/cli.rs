@@ -407,6 +407,37 @@ fn displays_model_metadata_and_discovers_context_window() {
 }
 
 #[test]
+fn refreshes_discovered_context_window_when_model_changes() {
+    let models = || {
+        json!({
+            "data": [
+                {"id": "mock-model", "context_length": 262144},
+                {"id": "other-model", "context_length": 200000}
+            ]
+        })
+    };
+    let provider = MockProvider::start(vec![
+        MockResponse::json(200, models()),
+        MockResponse::json(200, models()),
+    ]);
+    let project = TestProject::new(&provider);
+    let config = fs::read_to_string(&project.config)
+        .unwrap()
+        .replace("context_window = 262144\n", "");
+    fs::write(&project.config, config).unwrap();
+
+    let output = project.run("/model other-model\n/usage\n/exit\n");
+    assert!(stdout(&output).contains("200000 tokens"));
+    assert_eq!(provider.requests().len(), 2);
+
+    project.write_config(&provider.base_url, "");
+    let output = project.run("/model other-model\n/usage\n/exit\n");
+    assert!(stdout(&output).contains("262144 tokens"));
+    assert!(!stdout(&output).contains("200000 tokens"));
+    assert_eq!(provider.requests().len(), 2);
+}
+
+#[test]
 fn blocks_sensitive_files_without_sending_their_contents() {
     let provider = MockProvider::start(vec![
         MockResponse::tool_call("read", "read_file", json!({"path": ".env"})),

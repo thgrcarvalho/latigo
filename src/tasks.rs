@@ -347,3 +347,72 @@ async fn read_output(mut reader: impl AsyncRead + Unpin, log: Arc<Mutex<OutputLo
         }
     }
 }
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::fs;
+
+    use super::*;
+
+    struct ProcessGroupGuard(i32);
+
+    impl Drop for ProcessGroupGuard {
+        fn drop(&mut self) {
+            unsafe {
+                libc::kill(-self.0, libc::SIGKILL);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn stopping_a_task_kills_its_process_group_and_closes_output() {
+        let temp = tempfile::tempdir().expect("temporary task directory");
+        let shell_pid_path = temp.path().join("shell.pid");
+        let child_pid_path = temp.path().join("child.pid");
+        let command = format!(
+            "echo $$ > '{}'; sleep 60 & echo $! > '{}'; wait",
+            shell_pid_path.display(),
+            child_pid_path.display()
+        );
+        let manager = TaskManager::new(temp.path().join("tasks"));
+        let id = manager
+            .start(&command, "process group test", temp.path())
+            .await
+            .expect("start task");
+        let shell_pid = read_pid(&shell_pid_path).await;
+        let child_pid = read_pid(&child_pid_path).await;
+        let _guard = ProcessGroupGuard(shell_pid);
+        assert!(process_exists(child_pid));
+
+        manager.stop(&id, "test").await.expect("stop task");
+        let output = tokio::time::timeout(Duration::from_secs(5), manager.wait_for(Some(&id), 5))
+            .await
+            .expect("task output pipes should close after stopping the process group")
+            .expect("wait for stopped task");
+        assert!(output.contains("stopped"));
+
+        for _ in 0..50 {
+            if !process_exists(child_pid) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        panic!("child process {child_pid} survived its parent's process-group termination");
+    }
+
+    async fn read_pid(path: &Path) -> i32 {
+        for _ in 0..100 {
+            if let Ok(value) = fs::read_to_string(path)
+                && let Ok(pid) = value.trim().parse()
+            {
+                return pid;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        panic!("process ID was not written to {}", path.display());
+    }
+
+    fn process_exists(pid: i32) -> bool {
+        unsafe { libc::kill(pid, 0) == 0 }
+    }
+}
