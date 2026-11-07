@@ -21,6 +21,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 
 use crate::agent::{Agent, AgentEvent};
+use crate::client::ModelInfo;
 use crate::session::{Session, SessionStore};
 use crate::{SLASH_COMMANDS, handle_command, save_session};
 
@@ -47,6 +48,12 @@ struct UiState {
     scroll_back: usize,
     page_size: usize,
     approval: Option<String>,
+    model_picker: Option<ModelPicker>,
+}
+
+struct ModelPicker {
+    models: Vec<ModelInfo>,
+    selected: usize,
 }
 
 enum ConversationEntry {
@@ -137,8 +144,17 @@ impl Interface {
                     .next()
                     .unwrap_or_default()
                     .to_string();
-                let outcome = self
-                    .run_command(
+                let outcome = if prompt == "/models" {
+                    self.run_model_picker(
+                        agent,
+                        store,
+                        session,
+                        workspace_root,
+                        discover_context_window,
+                    )
+                    .await
+                } else {
+                    self.run_command(
                         &prompt,
                         agent,
                         store,
@@ -146,7 +162,8 @@ impl Interface {
                         workspace_root,
                         discover_context_window,
                     )
-                    .await;
+                    .await
+                };
                 match outcome {
                     Some(Ok(result)) => {
                         if matches!(command.as_str(), "/new" | "/clear" | "/resume") {
@@ -420,6 +437,113 @@ impl Interface {
         }
     }
 
+    async fn run_model_picker(
+        &self,
+        agent: &mut Agent,
+        store: &SessionStore,
+        session: &mut Session,
+        workspace_root: &Path,
+        discover_context_window: bool,
+    ) -> Option<Result<crate::CommandResult>> {
+        self.push_entry(ConversationEntry::User("/models".to_string()));
+        self.core.borrow_mut().state.working = true;
+        let outcome = {
+            let future = agent.list_models();
+            tokio::pin!(future);
+            loop {
+                tokio::select! {
+                    result = &mut future => break Some(result),
+                    _ = tokio::time::sleep(Duration::from_millis(50)) => {
+                        if self.poll_work_events().unwrap_or(true) {
+                            break None;
+                        }
+                        let _ = self.core.borrow_mut().draw();
+                    }
+                }
+            }
+        };
+        self.core.borrow_mut().state.working = false;
+        let models = match outcome {
+            Some(Ok(models)) => models,
+            Some(Err(error)) => return Some(Err(error)),
+            None => {
+                return Some(Ok(crate::CommandResult {
+                    output: "Model selection canceled.\n".to_string(),
+                    ..crate::CommandResult::default()
+                }));
+            }
+        };
+        if models.is_empty() {
+            return Some(Ok(crate::CommandResult {
+                output: "The provider returned no models.\n".to_string(),
+                ..crate::CommandResult::default()
+            }));
+        }
+        let selected = models
+            .iter()
+            .position(|model| model.id == agent.model())
+            .unwrap_or(0);
+        self.core.borrow_mut().state.model_picker = Some(ModelPicker { models, selected });
+        match self.read_model_picker() {
+            Ok(Some(model)) => {
+                self.run_command(
+                    &format!("/model {model}"),
+                    agent,
+                    store,
+                    session,
+                    workspace_root,
+                    discover_context_window,
+                )
+                .await
+            }
+            Ok(None) => Some(Ok(crate::CommandResult {
+                output: "Model selection canceled.\n".to_string(),
+                ..crate::CommandResult::default()
+            })),
+            Err(error) => Some(Err(error)),
+        }
+    }
+
+    fn read_model_picker(&self) -> Result<Option<String>> {
+        loop {
+            self.core.borrow_mut().draw()?;
+            if let Event::Key(key) = event::read()?
+                && is_key_press(key)
+            {
+                if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c')
+                    || key.code == KeyCode::Esc
+                {
+                    self.core.borrow_mut().state.model_picker = None;
+                    return Ok(None);
+                }
+                let mut core = self.core.borrow_mut();
+                let Some(picker) = core.state.model_picker.as_mut() else {
+                    return Ok(None);
+                };
+                match key.code {
+                    KeyCode::Up => {
+                        picker.selected = if picker.selected == 0 {
+                            picker.models.len() - 1
+                        } else {
+                            picker.selected - 1
+                        };
+                    }
+                    KeyCode::Down => {
+                        picker.selected = (picker.selected + 1) % picker.models.len();
+                    }
+                    KeyCode::Home => picker.selected = 0,
+                    KeyCode::End => picker.selected = picker.models.len() - 1,
+                    KeyCode::Enter => {
+                        let model = picker.models[picker.selected].id.clone();
+                        core.state.model_picker = None;
+                        return Ok(Some(model));
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
     async fn run_command(
         &self,
         prompt: &str,
@@ -563,7 +687,7 @@ fn draw_frame(frame: &mut Frame, state: &UiState) {
     .block(input_block)
     .scroll((0, horizontal_scroll as u16));
     frame.render_widget(input, chunks[2]);
-    if !state.working && state.approval.is_none() {
+    if !state.working && state.approval.is_none() && state.model_picker.is_none() {
         let cursor_x = input_inner.x as usize + 2 + cursor_width - horizontal_scroll;
         frame.set_cursor_position((cursor_x as u16, input_inner.y));
     }
@@ -587,6 +711,61 @@ fn draw_frame(frame: &mut Frame, state: &UiState) {
         frame.render_widget(Clear, area);
         frame.render_widget(prompt, area);
     }
+    if let Some(picker) = &state.model_picker {
+        let area = centered_rect(80, 70, frame.area());
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title("Select model · ↑/↓ move · Enter select · Esc cancel");
+        let inner = block.inner(area);
+        let lines = model_picker_lines(picker, &state.model, inner.height as usize);
+        frame.render_widget(Clear, area);
+        frame.render_widget(block, area);
+        frame.render_widget(Paragraph::new(lines), inner);
+    }
+}
+
+fn model_picker_lines(
+    picker: &ModelPicker,
+    current_model: &str,
+    visible_height: usize,
+) -> Vec<Line<'static>> {
+    let visible_height = visible_height.max(1);
+    let start = picker
+        .selected
+        .saturating_add(1)
+        .saturating_sub(visible_height);
+    picker
+        .models
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(visible_height)
+        .map(|(index, model)| {
+            let selected = index == picker.selected;
+            let selector = if selected { ">" } else { " " };
+            let current = if model.id == current_model { "*" } else { " " };
+            let name = if model.display_name == model.id {
+                model.id.clone()
+            } else {
+                format!("{} ({})", model.display_name, model.id)
+            };
+            let context = model
+                .context_length
+                .map(|value| format!(" · {value} tokens"))
+                .unwrap_or_default();
+            let style = if selected {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else if model.id == current_model {
+                Style::default().fg(Color::Green)
+            } else {
+                Style::default()
+            };
+            Line::styled(format!("{selector} {current} {name}{context}"), style)
+        })
+        .collect()
 }
 
 fn wrapped_line_count(text: &Text, width: u16) -> usize {
@@ -972,6 +1151,38 @@ mod tests {
                     && !span.style.add_modifier.contains(Modifier::BOLD)
                     && span.style.fg != Some(Color::Green))
         );
+    }
+
+    #[test]
+    fn model_picker_marks_selection_current_model_and_scrolls() {
+        let models = vec![
+            ModelInfo {
+                id: "first".to_string(),
+                display_name: "First".to_string(),
+                context_length: Some(1000),
+                supports_image_in: None,
+            },
+            ModelInfo {
+                id: "second".to_string(),
+                display_name: "Second".to_string(),
+                context_length: Some(2000),
+                supports_image_in: None,
+            },
+        ];
+        let picker = ModelPicker {
+            models,
+            selected: 1,
+        };
+        let lines = model_picker_lines(&picker, "second", 2);
+        assert_eq!(
+            lines[1].spans[0].content.as_ref(),
+            "> * Second (second) · 2000 tokens"
+        );
+        assert_eq!(lines[1].style.bg, Some(Color::Cyan));
+
+        let scrolled = model_picker_lines(&picker, "second", 1);
+        assert_eq!(scrolled.len(), 1);
+        assert!(scrolled[0].spans[0].content.contains("Second"));
     }
 
     #[test]

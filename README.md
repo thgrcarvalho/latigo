@@ -135,8 +135,8 @@ Run `latigo --help` for all command-line options.
 /clear                Clear the current conversation
 /compact              Compact the current conversation
 /usage                Show estimated context usage
-/models               List available models
-/model [id]           Show or change the model
+/models               Browse and select available models
+/model [id]           Show or directly change the model
 /permissions [mode]   Show or set ask, auto-edit, or auto
 /exit                 Save and exit
 /quit                 Alias for /exit
@@ -144,7 +144,7 @@ Run `latigo --help` for all command-line options.
 
 Interactive terminals use a full-screen Ratatui interface. Non-interactive runs and `TERM=dumb` retain the line-oriented interface.
 
-Use the up and down arrows to navigate input history and Tab to complete slash commands. PageUp and PageDown scroll through conversation history, and Ctrl-T expands or collapses tool output. Ctrl-C cancels active model work; at the prompt, Ctrl-C saves the session and exits. Approval dialogs accept `y` and reject with `n`, Enter, or Escape.
+Use the up and down arrows to navigate input history and Tab to complete slash commands. In the Ratatui interface, `/models` opens a model picker: use Up/Down to move, Enter to select, and Escape to cancel. PageUp and PageDown scroll through conversation history, and Ctrl-T expands or collapses tool output. Ctrl-C cancels active model work; at the prompt, Ctrl-C saves the session and exits. Approval dialogs accept `y` and reject with `n`, Enter, or Escape.
 
 Sessions are stored in `~/.latigo/sessions` by default. Input history and background-task data are stored alongside them under `~/.latigo`.
 
