@@ -8,6 +8,7 @@ use crate::web::{WebResearch, WebResearchConfig};
 pub enum AgentEvent {
     Content(String),
     ToolCall(String),
+    ToolResult { name: String, output: String },
     Compacted { before: usize, after: usize },
 }
 
@@ -198,6 +199,10 @@ impl Agent {
                     .unwrap_or("unknown");
                 on_event(AgentEvent::ToolCall(name.to_string()));
                 let result = self.execute_tool(&call).await;
+                on_event(AgentEvent::ToolResult {
+                    name: name.to_string(),
+                    output: result.clone(),
+                });
                 self.messages.push(json!({
                     "role": "tool",
                     "tool_call_id": call.get("id").and_then(Value::as_str).unwrap_or(""),

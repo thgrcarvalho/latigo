@@ -4,12 +4,13 @@ mod config;
 mod session;
 mod tasks;
 mod tools;
+mod ui;
 mod util;
 mod web;
 
 use std::env;
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
@@ -154,9 +155,21 @@ async fn run() -> Result<()> {
             }
         },
     };
+    let interactive = io::stdin().is_terminal()
+        && io::stdout().is_terminal()
+        && env::var("TERM").is_ok_and(|term| term != "dumb");
+    let interface = if interactive {
+        Some(ui::Interface::new()?)
+    } else {
+        None
+    };
+    let approval_handler: Box<dyn FnMut(&str) -> bool> = match &interface {
+        Some(interface) => interface.approval_handler(),
+        None => Box::new(approve),
+    };
     let workspace = Workspace::new(
         &args.workspace,
-        Box::new(approve),
+        approval_handler,
         permission_mode,
         config.commands,
         sessions_dir
@@ -183,6 +196,18 @@ async fn run() -> Result<()> {
         workspace_root.clone(),
         agent.messages().to_vec(),
     );
+    if let Some(interface) = interface {
+        return interface
+            .run(
+                &mut agent,
+                &store,
+                &mut session,
+                &workspace_root,
+                &history_path,
+                context_window_override.is_none(),
+            )
+            .await;
+    }
     let mut editor = Editor::<CommandHelper, DefaultHistory>::new()?;
     editor.set_helper(Some(CommandHelper));
     if history_path.exists()
@@ -229,11 +254,16 @@ async fn run() -> Result<()> {
                 &mut session,
                 &workspace_root,
                 context_window_override.is_none(),
+                &mut |action| approve(action),
             )
             .await
             {
-                Ok(true) => return Ok(()),
-                Ok(false) => {}
+                Ok(result) => {
+                    print!("{}", result.output);
+                    if result.exit {
+                        return Ok(());
+                    }
+                }
                 Err(error) => eprintln!("Error: {error:#}"),
             }
             continue;
@@ -254,6 +284,19 @@ async fn run() -> Result<()> {
     }
 }
 
+#[derive(Default)]
+struct CommandResult {
+    exit: bool,
+    output: String,
+}
+
+impl CommandResult {
+    fn line(&mut self, line: impl std::fmt::Display) {
+        self.output.push_str(&line.to_string());
+        self.output.push('\n');
+    }
+}
+
 async fn handle_command(
     input: &str,
     agent: &mut Agent,
@@ -261,23 +304,22 @@ async fn handle_command(
     session: &mut Session,
     workspace_root: &Path,
     discover_context_window: bool,
-) -> Result<bool> {
+    approve_action: &mut dyn FnMut(&str) -> bool,
+) -> Result<CommandResult> {
     let (command, argument) = input
         .split_once(char::is_whitespace)
         .map_or((input, ""), |(command, argument)| {
             (command, argument.trim())
         });
+    let mut result = CommandResult::default();
     match command {
         "/exit" | "/quit" => {
             save_session(store, session, agent)?;
-            Ok(true)
+            result.exit = true;
         }
-        "/help" => {
-            println!(
-                "Commands:\n  /help                 Show commands\n  /new                  Start a new session\n  /sessions             List saved sessions\n  /resume <id>          Resume a session in this workspace\n  /delete <id>          Delete a saved session\n  /clear                Clear current conversation\n  /compact              Compact current conversation\n  /usage                Show estimated context usage\n  /models               List available models\n  /model [id]           Show or change the model\n  /permissions [mode]   Show or set ask, auto-edit, or auto\n  /exit                 Save and exit"
-            );
-            Ok(false)
-        }
+        "/help" => result.line(
+            "Commands:\n  /help                 Show commands\n  /new                  Start a new session\n  /sessions             List saved sessions\n  /resume <id>          Resume a session in this workspace\n  /delete <id>          Delete a saved session\n  /clear                Clear current conversation\n  /compact              Compact current conversation\n  /usage                Show estimated context usage\n  /models               List available models\n  /model [id]           Show or change the model\n  /permissions [mode]   Show or set ask, auto-edit, or auto\n  /exit                 Save and exit",
+        ),
         "/new" => {
             save_session(store, session, agent)?;
             agent.clear();
@@ -286,16 +328,15 @@ async fn handle_command(
                 workspace_root.to_path_buf(),
                 agent.messages().to_vec(),
             );
-            println!("Started session {}", session.short_id());
-            Ok(false)
+            result.line(format!("Started session {}", session.short_id()));
         }
         "/sessions" => {
             let sessions = store.list()?;
             if sessions.is_empty() {
-                println!("No saved sessions.");
+                result.line("No saved sessions.");
             }
             for saved in sessions.into_iter().take(20) {
-                println!(
+                result.line(format!(
                     "{} | {} | {} | {}",
                     saved.short_id(),
                     saved.updated_at.format("%Y-%m-%d %H:%M"),
@@ -305,9 +346,8 @@ async fn handle_command(
                     } else {
                         &saved.title
                     }
-                );
+                ));
             }
-            Ok(false)
         }
         "/resume" => {
             save_session(store, session, agent)?;
@@ -320,14 +360,17 @@ async fn handle_command(
             }
             agent.set_model(loaded.model.clone());
             agent.restore_messages(loaded.messages.clone())?;
-            println!("Resumed session {} | {}", loaded.short_id(), loaded.model);
+            result.line(format!(
+                "Resumed session {} | {}",
+                loaded.short_id(),
+                loaded.model
+            ));
             *session = loaded;
-            Ok(false)
         }
         "/delete" => {
             let deleted = store.load(argument)?;
-            if !approve(&format!("Delete session {}?", deleted.short_id())) {
-                return Ok(false);
+            if !approve_action(&format!("Delete session {}?", deleted.short_id())) {
+                return Ok(result);
             }
             store.delete(argument)?;
             if deleted.id == session.id {
@@ -338,88 +381,81 @@ async fn handle_command(
                     agent.messages().to_vec(),
                 );
             }
-            println!("Deleted session {}", deleted.short_id());
-            Ok(false)
+            result.line(format!("Deleted session {}", deleted.short_id()));
         }
         "/clear" => {
             agent.clear();
             save_session(store, session, agent)?;
-            println!("Conversation cleared.");
-            Ok(false)
+            result.line("Conversation cleared.");
         }
         "/compact" => {
-            run_compaction(agent).await?;
+            let message = run_compaction(agent).await?;
             save_session(store, session, agent)?;
-            Ok(false)
+            result.line(message);
         }
-        "/usage" => {
-            println!(
-                "Session: {}\nModel: {}\nContext: ~{} / {} tokens (estimated)",
-                session.short_id(),
-                agent.model(),
-                agent.estimated_tokens(),
-                agent.context_window()
-            );
-            Ok(false)
-        }
+        "/usage" => result.line(format!(
+            "Session: {}\nModel: {}\nContext: ~{} / {} tokens (estimated)",
+            session.short_id(),
+            agent.model(),
+            agent.estimated_tokens(),
+            agent.context_window()
+        )),
         "/models" => {
             let models = agent.list_models().await?;
             if models.is_empty() {
-                println!("The provider returned no models.");
+                result.line("The provider returned no models.");
             } else {
-                println!("Available models:");
+                result.line("Available models:");
                 for model in models {
                     let marker = if model.id == agent.model() { "*" } else { " " };
                     if model.display_name == model.id {
-                        println!("{marker} {}", model.id);
+                        result.line(format!("{marker} {}", model.id));
                     } else {
-                        println!("{marker} {} ({})", model.display_name, model.id);
+                        result.line(format!("{marker} {} ({})", model.display_name, model.id));
                     }
                 }
             }
-            Ok(false)
         }
         "/model" => {
             if argument.is_empty() {
-                println!("Current model: {}", agent.model());
+                result.line(format!("Current model: {}", agent.model()));
             } else {
                 agent.set_model(argument.to_string());
-                println!("Model changed to {argument}");
+                result.line(format!("Model changed to {argument}"));
                 if discover_context_window {
                     match agent.refresh_context_window().await {
-                        Ok(Some(value)) => println!("Context window: {value} tokens"),
-                        Ok(None) => eprintln!(
+                        Ok(Some(value)) => result.line(format!("Context window: {value} tokens")),
+                        Ok(None) => result.line(format!(
                             "Could not discover the model context window; keeping {} tokens.",
                             agent.context_window()
-                        ),
-                        Err(error) => eprintln!(
+                        )),
+                        Err(error) => result.line(format!(
                             "Could not discover the model context window: {error:#}; keeping {} tokens.",
                             agent.context_window()
-                        ),
+                        )),
                     }
                 }
                 save_session(store, session, agent)?;
             }
-            Ok(false)
         }
         "/permissions" => {
             if argument.is_empty() {
-                println!("Permission mode: {}", agent.permission_mode());
+                result.line(format!("Permission mode: {}", agent.permission_mode()));
             } else {
                 let mode =
                     PermissionMode::from_str(argument).map_err(|error| anyhow::anyhow!(error))?;
                 agent.set_permission_mode(mode);
-                println!("Permission mode changed to {mode}");
+                result.line(format!("Permission mode changed to {mode}"));
                 if mode == PermissionMode::Auto {
-                    println!(
-                        "Warning: writes, patches, and most commands no longer require approval. Dangerous commands still require approval."
+                    result.line(
+                        "Warning: writes, patches, and most commands no longer require approval. Dangerous commands still require approval.",
                     );
                 }
             }
-            Ok(false)
         }
         _ => bail!("Unknown command: {command}. Use /help."),
     }
+    Ok(result)
 }
 
 async fn run_prompt(agent: &mut Agent, prompt: &str) -> Result<()> {
@@ -442,6 +478,7 @@ async fn run_prompt(agent: &mut Agent, prompt: &str) -> Result<()> {
                 }
                 println!("\n[tool] {name}");
             }
+            AgentEvent::ToolResult { .. } => {}
             AgentEvent::Compacted { before, after } => {
                 if response_started {
                     println!();
@@ -474,20 +511,15 @@ async fn run_prompt(agent: &mut Agent, prompt: &str) -> Result<()> {
     }
 }
 
-async fn run_compaction(agent: &mut Agent) -> Result<()> {
-    println!("Compacting conversation...");
+async fn run_compaction(agent: &mut Agent) -> Result<String> {
     let future = agent.compact();
     tokio::pin!(future);
     tokio::select! {
         result = future => {
             let (before, after) = result?;
-            println!("Context compacted: ~{before} -> ~{after} tokens.");
-            Ok(())
+            Ok(format!("Context compacted: ~{before} -> ~{after} tokens."))
         }
-        _ = tokio::signal::ctrl_c() => {
-            println!("Compaction interrupted.");
-            Ok(())
-        }
+        _ = tokio::signal::ctrl_c() => Ok("Compaction interrupted.".to_string())
     }
 }
 

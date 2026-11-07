@@ -7,6 +7,7 @@ A latigo is the strap that secures a saddle's cinch. Latigo secures the setup ar
 ## Features
 
 - Streaming model responses and tool calls
+- Ratatui interface with scrollable history, Markdown rendering, and expandable tool output
 - OpenAI-compatible providers, including Kimi
 - Persistent sessions with workspace-specific resume
 - Input history and slash-command completion
@@ -141,7 +142,9 @@ Run `latigo --help` for all command-line options.
 /quit                 Alias for /exit
 ```
 
-Use the up and down arrows to navigate input history and Tab to complete slash commands. Ctrl-C cancels active model work; at the prompt, Ctrl-C saves the session and exits.
+Interactive terminals use a full-screen Ratatui interface. Non-interactive runs and `TERM=dumb` retain the line-oriented interface.
+
+Use the up and down arrows to navigate input history and Tab to complete slash commands. PageUp and PageDown scroll through conversation history, and Ctrl-T expands or collapses tool output. Ctrl-C cancels active model work; at the prompt, Ctrl-C saves the session and exits. Approval dialogs accept `y` and reject with `n`, Enter, or Escape.
 
 Sessions are stored in `~/.latigo/sessions` by default. Input history and background-task data are stored alongside them under `~/.latigo`.
 
@@ -236,17 +239,16 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 
-The integration tests use a reusable mock provider and cover streaming, sessions, tool calls, retries, model metadata, sensitive-file protection, background tasks, Kimi search, and image attachments.
+The integration tests use a reusable mock provider and cover streaming, sessions, tool calls, retries, model metadata, sensitive-file protection, background tasks, Kimi search, and image attachments. Unit tests also cover Markdown rendering, input editing and completion, tool-output expansion, and process-group shutdown.
 
 ## Roadmap
 
 The next planned milestones are:
 
-1. Ratatui interface improvements, including scrollable history, Markdown rendering, and expandable tool output
-2. Model Context Protocol (MCP) support
-3. Hooks
-4. Plugins
-5. Subagents
+1. Model Context Protocol (MCP) support
+2. Hooks
+3. Plugins
+4. Subagents
 
 ## Project status
 
