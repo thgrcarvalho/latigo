@@ -3,6 +3,7 @@ mod client;
 mod config;
 mod hooks;
 mod mcp;
+mod plugins;
 mod session;
 mod tasks;
 mod tools;
@@ -31,6 +32,7 @@ use crate::agent::{Agent, AgentEvent, AgentOptions};
 use crate::client::OpenAICompatibleClient;
 use crate::config::AppConfig;
 use crate::mcp::McpManager;
+use crate::plugins::PluginManager;
 use crate::session::{Session, SessionStore};
 use crate::tools::{PermissionMode, Workspace};
 
@@ -94,7 +96,7 @@ async fn run() -> Result<()> {
         Some(path) => path.clone(),
         None => default_config_path()?,
     };
-    let config = AppConfig::load(&config_path, config_required)?;
+    let mut config = AppConfig::load(&config_path, config_required)?;
 
     let model = args
         .model
@@ -193,6 +195,17 @@ async fn run() -> Result<()> {
             .join("tasks"),
     )?;
     let workspace_root = workspace.root.clone();
+    let plugins = PluginManager::load(
+        &config.plugins,
+        config_path.parent().unwrap_or_else(|| Path::new(".")),
+        &home_dir()?.join(".config/latigo/plugins"),
+    )?;
+    for (name, server) in plugins.mcp.servers.clone() {
+        if config.mcp.servers.insert(name.clone(), server).is_some() {
+            bail!("MCP server {name} is defined by both configuration and a plugin");
+        }
+    }
+    config.hooks.extend(plugins.hooks.clone());
     let mcp = McpManager::connect(config.mcp, &workspace_root).await?;
     let mut agent = Agent::new(
         client,
@@ -200,6 +213,7 @@ async fn run() -> Result<()> {
         config.web_research,
         mcp,
         config.hooks,
+        plugins,
         AgentOptions {
             max_steps,
             context_window,
@@ -270,6 +284,23 @@ async fn run() -> Result<()> {
         }
         editor.append_history(&history_path)?;
         if prompt.starts_with('/') {
+            match agent.expand_plugin_command(prompt) {
+                Ok(Some(expanded)) => {
+                    let result = run_prompt(&mut agent, &expanded).await;
+                    if let Err(error) = save_session(&store, &mut session, &agent) {
+                        eprintln!("Could not save session: {error:#}");
+                    }
+                    if let Err(error) = result {
+                        eprintln!("\nError: {error:#}");
+                    }
+                    continue;
+                }
+                Err(error) => {
+                    eprintln!("Error: {error:#}");
+                    continue;
+                }
+                Ok(None) => {}
+            }
             match handle_command(
                 prompt,
                 &mut agent,
@@ -342,7 +373,7 @@ async fn handle_command(
             result.exit = true;
         }
         "/help" => result.line(
-            "Commands:\n  /help                 Show commands\n  /new                  Start a new session\n  /sessions             List saved sessions\n  /resume <id>          Resume a session in this workspace\n  /delete <id>          Delete a saved session\n  /clear                Clear current conversation\n  /compact              Compact current conversation\n  /usage                Show estimated context usage\n  /models               Browse and select models\n  /model [id]           Show or change the model\n  /effort [value]       Show, set, or use default reasoning effort\n  /mcp                  Show connected MCP servers and tool counts\n  /hooks                Show configured lifecycle hooks\n  /permissions [mode]   Show or set ask, auto-edit, or auto\n  /exit                 Save and exit",
+            "Commands:\n  /help                 Show commands\n  /new                  Start a new session\n  /sessions             List saved sessions\n  /resume <id>          Resume a session in this workspace\n  /delete <id>          Delete a saved session\n  /clear                Clear current conversation\n  /compact              Compact current conversation\n  /usage                Show estimated context usage\n  /models               Browse and select models\n  /model [id]           Show or change the model\n  /effort [value]       Show, set, or use default reasoning effort\n  /mcp                  Show connected MCP servers and tool counts\n  /hooks                Show configured lifecycle hooks\n  /plugins              Show loaded plugins\n  /permissions [mode]   Show or set ask, auto-edit, or auto\n  /exit                 Save and exit",
         ),
         "/new" => {
             save_session(store, session, agent)?;
@@ -442,6 +473,11 @@ async fn handle_command(
             }
             for line in status {
                 result.line(line);
+            }
+        }
+        "/plugins" => {
+            for status in agent.plugin_status() {
+                result.line(status);
             }
         }
         "/models" => {
@@ -693,6 +729,7 @@ const SLASH_COMMANDS: &[&str] = &[
     "/effort",
     "/mcp",
     "/hooks",
+    "/plugins",
     "/permissions",
     "/exit",
     "/quit",

@@ -148,6 +148,24 @@ impl Interface {
             };
             append_history(history_path, &prompt)?;
             if prompt.starts_with('/') {
+                match agent.expand_plugin_command(&prompt) {
+                    Ok(Some(expanded)) => {
+                        self.run_agent(&expanded, agent).await;
+                        if let Err(error) = save_session(store, session, agent) {
+                            self.push_entry(ConversationEntry::Error(format!(
+                                "Could not save session: {error:#}"
+                            )));
+                        }
+                        self.render(agent, session)?;
+                        continue;
+                    }
+                    Err(error) => {
+                        self.push_entry(ConversationEntry::Error(format!("{error:#}")));
+                        self.render(agent, session)?;
+                        continue;
+                    }
+                    Ok(None) => {}
+                }
                 let command = prompt
                     .split_whitespace()
                     .next()

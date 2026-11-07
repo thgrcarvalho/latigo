@@ -45,6 +45,7 @@ pub struct HookCommand {
     pub command: String,
     pub matcher: Option<String>,
     pub timeout_seconds: Option<u64>,
+    pub cwd: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -183,7 +184,7 @@ impl HookRunner {
             Duration::from_secs(hook.timeout_seconds.unwrap_or(self.config.timeout_seconds));
         let mut process = shell_command(&hook.command);
         process
-            .current_dir(&self.workspace)
+            .current_dir(hook.cwd.as_deref().unwrap_or(&self.workspace))
             .env("LATIGO_HOOK_EVENT", event.as_str())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -235,6 +236,30 @@ impl HookRunner {
 }
 
 impl HooksConfig {
+    pub fn extend(&mut self, other: Self) {
+        self.session_start.extend(other.session_start);
+        self.session_end.extend(other.session_end);
+        self.user_prompt_submit.extend(other.user_prompt_submit);
+        self.pre_tool_use.extend(other.pre_tool_use);
+        self.post_tool_use.extend(other.post_tool_use);
+        self.pre_compact.extend(other.pre_compact);
+        self.stop.extend(other.stop);
+    }
+
+    pub fn commands_mut(&mut self) -> impl Iterator<Item = &mut HookCommand> {
+        [
+            &mut self.session_start,
+            &mut self.session_end,
+            &mut self.user_prompt_submit,
+            &mut self.pre_tool_use,
+            &mut self.post_tool_use,
+            &mut self.pre_compact,
+            &mut self.stop,
+        ]
+        .into_iter()
+        .flatten()
+    }
+
     fn commands(&self) -> impl Iterator<Item = &HookCommand> {
         [
             &self.session_start,

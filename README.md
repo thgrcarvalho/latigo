@@ -15,6 +15,7 @@ A latigo is the strap that secures a saddle's cinch. Latigo secures the setup ar
 - Metadata-driven reasoning-effort selection with provider defaults
 - Model Context Protocol (MCP) stdio servers with dynamic tool discovery
 - Lifecycle hooks with tool matchers, blocking decisions, and context injection
+- Trusted plugin manifests that contribute commands, hooks, and MCP servers
 - Context-window discovery and automatic or manual compaction
 - Text and image attachments
 - Workspace file search, reading, writing, and patching
@@ -148,6 +149,7 @@ Run `latigo --help` for all command-line options.
 /effort default       Use the provider's default reasoning effort
 /mcp                  Show connected MCP servers and tool counts
 /hooks                Show configured lifecycle hooks
+/plugins              Show loaded plugins and custom commands
 /permissions [mode]   Show or set ask, auto-edit, or auto
 /exit                 Save and exit
 /quit                 Alias for /exit
@@ -259,6 +261,36 @@ Exit code 0 allows the operation. Exit code 2 blocks it and uses stderr, or stdo
 
 Additional context is added to prompts, tool results, session startup, or compaction guidance as appropriate. A blocked stop hook, or one returning context, asks the model to continue. Plain non-JSON stdout is ignored. Use `/hooks` to inspect configured event counts. Hooks execute without a separate approval prompt, so only load configuration and plugins you trust.
 
+## Plugins
+
+A plugin is a directory containing `plugin.toml`. Latigo automatically loads plugins from `~/.config/latigo/plugins`; additional trusted plugin directories or manifest files can be listed explicitly:
+
+```toml
+plugins = ["./my-plugin", "/absolute/path/to/another-plugin"]
+```
+
+Relative paths are resolved from the directory containing `config.toml`. Workspace plugins are not discovered automatically: a repository cannot gain execution merely because Latigo is started inside it.
+
+Example `plugin.toml`:
+
+```toml
+name = "project-tools"
+description = "Project-specific agent extensions"
+
+[commands.review]
+description = "Review the requested files"
+prompt = "Review $ARGUMENTS for correctness and regressions."
+
+[[hooks.session_start]]
+command = "./hooks/session-start.sh"
+
+[mcp.servers.local]
+command = "./mcp-server"
+args = ["--stdio"]
+```
+
+Custom command arguments replace `$ARGUMENTS` or `{{input}}`. If the template has neither placeholder, nonempty arguments are appended. Built-in commands cannot be overridden. Plugin MCP server names are namespaced with the plugin name, and plugin hooks default to running in the plugin directory. Both MCP servers and hooks can execute arbitrary programs, so install only trusted plugins. Use `/plugins` to list loaded plugins and custom commands.
+
 ## Permissions and safety
 
 The default permission mode is `ask`.
@@ -314,14 +346,13 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 
-The integration tests use a reusable mock provider and cover streaming, sessions, tool calls, retries, model metadata, sensitive-file protection, background tasks, Kimi search, image attachments, MCP stdio tool calls, and lifecycle hooks. Unit tests also cover hook control responses, MCP result handling, Markdown rendering, input editing and completion, tool-output expansion, and process-group shutdown.
+The integration tests use a reusable mock provider and cover streaming, sessions, tool calls, retries, model metadata, sensitive-file protection, background tasks, Kimi search, image attachments, MCP stdio tool calls, lifecycle hooks, and plugin extensions. Unit tests also cover plugin command expansion, hook control responses, MCP result handling, Markdown rendering, input editing and completion, tool-output expansion, and process-group shutdown.
 
 ## Roadmap
 
-The next planned milestones are:
+The next planned milestone is:
 
-1. Plugins
-2. Subagents
+1. Subagents
 
 ## Project status
 

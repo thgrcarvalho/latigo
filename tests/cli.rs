@@ -808,3 +808,100 @@ fn pre_tool_hook_can_block_execution() {
             .contains("blocked-by-test")
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn loads_plugin_commands_hooks_and_mcp_servers() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let provider = MockProvider::start(vec![
+        MockResponse::tool_call(
+            "plugin-mcp",
+            "mcp__sample_fake__echo_message",
+            json!({"text": "plugin"}),
+        ),
+        MockResponse::text("Plugin complete"),
+    ]);
+    let project = TestProject::new(&provider);
+    let plugin = project.root.join("sample-plugin");
+    fs::create_dir(&plugin).unwrap();
+    let script = plugin.join("extension.sh");
+    fs::write(
+        &script,
+        r#"#!/bin/sh
+if [ "${LATIGO_HOOK_EVENT:-}" = "session_start" ]; then
+  IFS= read -r payload
+  touch plugin-hook-ran
+  printf '%s\n' '{"additionalContext":"plugin-session-context"}'
+  exit 0
+fi
+while IFS= read -r line; do
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"plugin","version":"1"}}}'
+      ;;
+    *'"method":"tools/list"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"echo.message","description":"Echo","inputSchema":{"type":"object","properties":{"text":{"type":"string"}}}}]}}'
+      ;;
+    *'"method":"tools/call"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"plugin MCP result"}]}}'
+      ;;
+  esac
+done
+"#,
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&script).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&script, permissions).unwrap();
+    fs::write(
+        plugin.join("plugin.toml"),
+        r#"name = "sample"
+description = "Test extension"
+
+[commands.inspect]
+description = "Inspect plugin arguments"
+prompt = "Inspect plugin input: $ARGUMENTS"
+
+[[hooks.session_start]]
+command = "./extension.sh"
+
+[mcp.servers.fake]
+command = "./extension.sh"
+"#,
+    )
+    .unwrap();
+    let config = fs::read_to_string(&project.config).unwrap().replace(
+        "model = \"mock-model\"",
+        &format!(
+            "plugins = [\"{}\"]\nmodel = \"mock-model\"",
+            plugin.display()
+        ),
+    );
+    fs::write(&project.config, config).unwrap();
+
+    let output = project.run("/inspect some args\ny\n/plugins\n/exit\n");
+    assert!(stdout(&output).contains("Plugin complete"));
+    assert!(stdout(&output).contains("sample: Test extension"));
+    assert!(stdout(&output).contains("/inspect: Inspect plugin arguments"));
+    assert!(plugin.join("plugin-hook-ran").exists());
+    let requests = provider.requests();
+    assert!(
+        requests[0]
+            .body
+            .to_string()
+            .contains("Inspect plugin input: some args")
+    );
+    assert!(
+        requests[0]
+            .body
+            .to_string()
+            .contains("plugin-session-context")
+    );
+    assert!(
+        requests[0].body["tools"]
+            .to_string()
+            .contains("mcp__sample_fake__echo_message")
+    );
+    assert!(requests[1].body.to_string().contains("plugin MCP result"));
+}

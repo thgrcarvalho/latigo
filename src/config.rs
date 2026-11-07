@@ -21,6 +21,7 @@ pub struct AppConfig {
     pub auto_compact: Option<bool>,
     pub permission_mode: Option<PermissionMode>,
     pub sessions_dir: Option<PathBuf>,
+    pub plugins: Vec<PathBuf>,
     pub commands: CommandRules,
     pub web_research: WebResearchConfig,
     pub mcp: McpConfig,

@@ -4,6 +4,7 @@ use serde_json::{Map, Value, json};
 use crate::client::{ModelInfo, OpenAICompatibleClient};
 use crate::hooks::{HookEvent, HookRunner, HooksConfig};
 use crate::mcp::McpManager;
+use crate::plugins::PluginManager;
 use crate::tools::{PermissionMode, Workspace};
 use crate::web::{WebResearch, WebResearchConfig};
 
@@ -27,6 +28,7 @@ pub struct Agent {
     web: WebResearch,
     mcp: McpManager,
     hooks: HookRunner,
+    plugins: PluginManager,
     session_id: String,
     options: AgentOptions,
     messages: Vec<Value>,
@@ -40,6 +42,7 @@ impl Agent {
         web_config: WebResearchConfig,
         mcp: McpManager,
         hooks_config: HooksConfig,
+        plugins: PluginManager,
         options: AgentOptions,
     ) -> Result<Self> {
         let system_message = json!({
@@ -56,6 +59,7 @@ impl Agent {
             web: WebResearch::new(web_config, client)?,
             mcp,
             hooks,
+            plugins,
             session_id: "unassigned".to_string(),
             options,
             messages: vec![system_message],
@@ -117,6 +121,18 @@ impl Agent {
 
     pub fn hooks_status(&self) -> Vec<String> {
         self.hooks.status()
+    }
+
+    pub fn plugin_status(&self) -> Vec<String> {
+        self.plugins.status()
+    }
+
+    pub fn expand_plugin_command(&self, input: &str) -> Result<Option<String>> {
+        let command = input.split_whitespace().next().unwrap_or_default();
+        if crate::SLASH_COMMANDS.contains(&command) {
+            return Ok(None);
+        }
+        self.plugins.expand_command(input)
     }
 
     pub async fn start_session(&mut self, session_id: String) -> Result<()> {
