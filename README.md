@@ -197,7 +197,7 @@ Print mode retains the configured permission mode. If an action requires approva
 
 Interactive terminals use a full-screen Ratatui interface. Non-interactive runs and `TERM=dumb` retain the line-oriented interface.
 
-Use the up and down arrows to navigate input history and Tab to complete slash commands. In the Ratatui interface, `/models` and `/effort` open pickers: use Up/Down to move, Enter to select, and Escape to cancel. Effort choices and defaults come from the current model's metadata rather than a hardcoded list. Direct `/effort <value>` input remains available for provider-specific values. PageUp and PageDown scroll through conversation history, and Ctrl-T expands or collapses tool output. Ctrl-C cancels active model work; at the prompt, Ctrl-C saves the session and exits. Approval dialogs accept `y` and reject with `n`, Enter, or Escape.
+Use the up and down arrows to navigate input history and Tab to complete slash commands. In the Ratatui interface, the mouse wheel scrolls the conversation by three lines without changing the prompt, and PageUp and PageDown scroll by a page. `/models` and `/effort` open pickers: use Up/Down to move, Enter to select, and Escape to cancel. Effort choices and defaults come from the current model's metadata rather than a hardcoded list. Direct `/effort <value>` input remains available for provider-specific values. Ctrl-T expands or collapses tool output. Ctrl-C cancels active model work; at the prompt, Ctrl-C saves the session and exits. Approval dialogs accept `y` and reject with `n`, Enter, or Escape.
 
 Sessions are stored in `~/.latigo/sessions` by default. Input history and background-task data are stored alongside them under `~/.latigo`.
 

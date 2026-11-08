@@ -7,7 +7,10 @@ use std::time::Duration;
 
 use anyhow::Result;
 use crossterm::cursor::Show;
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+    KeyModifiers, MouseEventKind,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -90,19 +93,30 @@ enum IdleAction {
     Exit,
 }
 
+impl UiState {
+    fn handle_mouse(&mut self, kind: MouseEventKind) {
+        match kind {
+            MouseEventKind::ScrollUp => self.scroll_back = self.scroll_back.saturating_add(3),
+            MouseEventKind::ScrollDown => self.scroll_back = self.scroll_back.saturating_sub(3),
+            _ => {}
+        }
+    }
+}
+
 impl Interface {
     pub fn new() -> Result<Self> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
-        if let Err(error) = execute!(stdout, EnterAlternateScreen) {
+        if let Err(error) = execute!(stdout, EnterAlternateScreen, EnableMouseCapture) {
             let _ = disable_raw_mode();
+            let _ = execute!(io::stdout(), DisableMouseCapture, LeaveAlternateScreen);
             return Err(error.into());
         }
         let terminal = match Terminal::new(CrosstermBackend::new(stdout)) {
             Ok(terminal) => terminal,
             Err(error) => {
                 let _ = disable_raw_mode();
-                let _ = execute!(io::stdout(), LeaveAlternateScreen);
+                let _ = execute!(io::stdout(), DisableMouseCapture, LeaveAlternateScreen);
                 return Err(error.into());
             }
         };
@@ -308,14 +322,19 @@ impl Interface {
     fn read_input(&self) -> Result<IdleAction> {
         self.core.borrow_mut().draw()?;
         loop {
-            if let Event::Key(key) = event::read()?
-                && is_key_press(key)
-            {
-                let action = self.handle_idle_key(key);
-                if !matches!(action, IdleAction::None) {
-                    return Ok(action);
+            match event::read()? {
+                Event::Key(key) if is_key_press(key) => {
+                    let action = self.handle_idle_key(key);
+                    if !matches!(action, IdleAction::None) {
+                        return Ok(action);
+                    }
+                    self.core.borrow_mut().draw()?;
                 }
-                self.core.borrow_mut().draw()?;
+                Event::Mouse(mouse) => {
+                    self.core.borrow_mut().state.handle_mouse(mouse.kind);
+                    self.core.borrow_mut().draw()?;
+                }
+                _ => {}
             }
         }
     }
@@ -757,10 +776,10 @@ impl Interface {
 
     fn poll_work_events(&self) -> Result<bool> {
         while event::poll(Duration::ZERO)? {
-            if let Event::Key(key) = event::read()?
-                && self.handle_work_key(key)
-            {
-                return Ok(true);
+            match event::read()? {
+                Event::Key(key) if self.handle_work_key(key) => return Ok(true),
+                Event::Mouse(mouse) => self.core.borrow_mut().state.handle_mouse(mouse.kind),
+                _ => {}
             }
         }
         Ok(false)
@@ -771,7 +790,12 @@ impl Drop for Interface {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
         let mut core = self.core.borrow_mut();
-        let _ = execute!(core.terminal.backend_mut(), LeaveAlternateScreen, Show);
+        let _ = execute!(
+            core.terminal.backend_mut(),
+            DisableMouseCapture,
+            LeaveAlternateScreen,
+            Show
+        );
     }
 }
 
@@ -1463,5 +1487,25 @@ mod tests {
         assert_eq!(input.text, "second");
         input.next_history();
         assert_eq!(input.text, "/model");
+    }
+
+    #[test]
+    fn mouse_wheel_scrolls_conversation_without_changing_input_history() {
+        let mut state = UiState {
+            input: InputState {
+                history: vec!["previous prompt".to_string()],
+                ..InputState::default()
+            },
+            ..UiState::default()
+        };
+
+        state.handle_mouse(MouseEventKind::ScrollUp);
+        assert_eq!(state.scroll_back, 3);
+        assert_eq!(state.input.history_index, None);
+        assert!(state.input.text.is_empty());
+
+        state.handle_mouse(MouseEventKind::ScrollDown);
+        assert_eq!(state.scroll_back, 0);
+        assert_eq!(state.input.history_index, None);
     }
 }
