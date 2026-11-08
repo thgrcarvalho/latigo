@@ -232,7 +232,7 @@ In the Ratatui interface, press **Ctrl-V** or **Alt-V** to paste from the system
 
 Clipboard paste uses native clipboard APIs on Windows, macOS, and Linux. Linux requires an accessible X11 or compatible Wayland clipboard. On WSL, Latigo invokes Windows PowerShell directly to stream PNG images, read copied file paths, and read Unicode text from the Windows clipboard, avoiding WSLg clipboard focus changes and requiring no custom `wl-paste` wrapper. The line-oriented interface and print mode continue to use `@path` attachments rather than interactive clipboard capture.
 
-Images are limited to 10 MB and 8000 by 8000 pixels. Videos are limited to 20 MB each; larger videos are not currently supported. Kimi endpoints upload videos with `purpose=video` and reference the returned `ms://` file ID, which remains available for follow-up turns and resumed sessions. Other OpenAI-compatible providers receive base64 video data. File references are whitespace-separated, so paths containing spaces are not currently supported.
+Images are limited to 10 MB and 8000 by 8000 pixels. Videos are limited to 100 MiB each, matching Kimi's upload API. Kimi endpoints upload videos with `purpose=video` and reference the returned `ms://` file ID, which remains available for follow-up turns and resumed sessions. Other OpenAI-compatible providers receive base64 video data and may enforce smaller request-body limits. File references are whitespace-separated, so paths containing spaces are not currently supported.
 
 ## Built-in tools
 

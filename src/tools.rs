@@ -143,8 +143,8 @@ impl VideoAttachment {
         let mime = video_mime(path)
             .with_context(|| format!("Unsupported video format: {}", path.display()))?;
         let metadata = fs::metadata(path)?;
-        if metadata.len() > 20_000_000 {
-            bail!("Video exceeds the 20 MB limit: {}", path.display());
+        if metadata.len() > 100 * 1024 * 1024 {
+            bail!("Video exceeds the 100 MiB limit: {}", path.display());
         }
         if !metadata.is_file() {
             bail!("Not a file: {}", path.display());
