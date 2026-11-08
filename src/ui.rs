@@ -145,9 +145,12 @@ impl Interface {
         {
             let mut core = self.core.borrow_mut();
             core.state.input.history = read_history(history_path);
-            core.state.entries.push(ConversationEntry::Status(
-                "Welcome to Latigo. Use /help for commands.".to_string(),
-            ));
+            core.state.entries = restored_conversation_entries(agent.messages());
+            if core.state.entries.is_empty() {
+                core.state.entries.push(ConversationEntry::Status(
+                    "Welcome to Latigo. Use /help for commands.".to_string(),
+                ));
+            }
         }
         self.render(agent, session)?;
         loop {
@@ -216,8 +219,11 @@ impl Interface {
                 };
                 match outcome {
                     Some(Ok(result)) => {
-                        if matches!(command.as_str(), "/new" | "/clear" | "/resume") {
+                        if matches!(command.as_str(), "/new" | "/clear") {
                             self.core.borrow_mut().state.entries.clear();
+                        } else if command == "/resume" {
+                            self.core.borrow_mut().state.entries =
+                                restored_conversation_entries(agent.messages());
                         }
                         if !result.output.trim().is_empty() {
                             self.push_entry(ConversationEntry::Status(result.output));
@@ -1044,6 +1050,93 @@ fn wrapped_line_count(text: &Text, width: u16) -> usize {
         .sum()
 }
 
+fn restored_conversation_entries(messages: &[serde_json::Value]) -> Vec<ConversationEntry> {
+    let mut entries = Vec::new();
+    let mut tool_entries = std::collections::HashMap::new();
+    for message in messages {
+        match message.get("role").and_then(serde_json::Value::as_str) {
+            Some("system") => {
+                if let Some(summary) = crate::message_text(message)
+                    && summary.starts_with("Summary of the earlier conversation:")
+                {
+                    entries.push(ConversationEntry::Status(summary.to_string()));
+                }
+            }
+            Some("user") => {
+                if let Some(text) = crate::message_text(message)
+                    && !text.is_empty()
+                {
+                    entries.push(ConversationEntry::User(text.to_string()));
+                }
+            }
+            Some("assistant") => {
+                if let Some(text) = crate::message_text(message)
+                    && !text.is_empty()
+                {
+                    entries.push(ConversationEntry::Agent(text.to_string()));
+                }
+                for call in message
+                    .get("tool_calls")
+                    .and_then(serde_json::Value::as_array)
+                    .into_iter()
+                    .flatten()
+                {
+                    let name = call
+                        .get("function")
+                        .and_then(|function| function.get("name"))
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("unknown")
+                        .to_string();
+                    let index = entries.len();
+                    entries.push(ConversationEntry::Tool { name, output: None });
+                    if let Some(id) = call.get("id").and_then(serde_json::Value::as_str) {
+                        tool_entries.insert(id.to_string(), index);
+                    }
+                }
+            }
+            Some("tool") => {
+                let id = message
+                    .get("tool_call_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default();
+                let name = message
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("unknown");
+                let output = crate::message_text(message)
+                    .map(ToString::to_string)
+                    .unwrap_or_else(|| message["content"].to_string());
+                if let Some(index) = tool_entries.get(id).copied().or_else(|| {
+                    entries.iter().rposition(|entry| {
+                        matches!(
+                            entry,
+                            ConversationEntry::Tool {
+                                name: tool_name,
+                                output: None,
+                            } if tool_name == name
+                        )
+                    })
+                }) {
+                    if let ConversationEntry::Tool {
+                        output: destination,
+                        ..
+                    } = &mut entries[index]
+                    {
+                        *destination = Some(output);
+                    }
+                } else {
+                    entries.push(ConversationEntry::Tool {
+                        name: name.to_string(),
+                        output: Some(output),
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+    entries
+}
+
 fn conversation_text(entries: &[ConversationEntry], expand_tools: bool) -> Text<'static> {
     let mut lines = Vec::new();
     for entry in entries {
@@ -1456,6 +1549,41 @@ mod tests {
         let expanded = conversation_text(&entries, true);
         assert!(!format!("{collapsed:?}").contains("full output"));
         assert!(format!("{expanded:?}").contains("full output"));
+    }
+
+    #[test]
+    fn restored_messages_rebuild_conversation_and_tool_output() {
+        let messages = vec![
+            serde_json::json!({"role": "system", "content": "Instructions"}),
+            serde_json::json!({"role": "user", "content": "Previous question"}),
+            serde_json::json!({"role": "assistant", "content": "Previous answer"}),
+            serde_json::json!({
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": "call-1",
+                    "function": {"name": "read_file", "arguments": "{}"}
+                }]
+            }),
+            serde_json::json!({
+                "role": "tool",
+                "tool_call_id": "call-1",
+                "name": "read_file",
+                "content": "Restored tool output"
+            }),
+            serde_json::json!({"role": "assistant", "content": "Final answer"}),
+        ];
+
+        let entries = restored_conversation_entries(&messages);
+        assert_eq!(entries.len(), 4);
+        assert!(
+            matches!(&entries[0], ConversationEntry::User(text) if text == "Previous question")
+        );
+        assert!(matches!(&entries[1], ConversationEntry::Agent(text) if text == "Previous answer"));
+        assert!(
+            matches!(&entries[2], ConversationEntry::Tool { name, output: Some(output) } if name == "read_file" && output == "Restored tool output")
+        );
+        assert!(matches!(&entries[3], ConversationEntry::Agent(text) if text == "Final answer"));
     }
 
     #[test]

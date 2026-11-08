@@ -209,7 +209,7 @@ latigo --resume <id>
 latigo --resume <id> --fork-session
 ```
 
-`--session` is an alias for `--resume`, and `-c` and `-r` are short forms for continuation and resume. Resuming restores messages, model, and reasoning effort, and refreshes context-window discovery when no explicit override is set. Sessions from other workspaces are rejected.
+`--session` is an alias for `--resume`, and `-c` and `-r` are short forms for continuation and resume. Resuming restores messages, model, and reasoning effort, and refreshes context-window discovery when no explicit override is set. The TUI reconstructs the visible conversation, including assistant replies and tool results, so you can scroll through restored history. Sessions from other workspaces are rejected.
 
 `/fork` saves a full independent copy with a new ID while keeping the current session active. `--fork-session` does the same during startup. `/title <text>` assigns a title of up to 200 characters for easier identification in `/sessions`.
 
