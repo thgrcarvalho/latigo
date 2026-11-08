@@ -372,15 +372,15 @@ impl Interface {
     fn handle_idle_key(&self, key: KeyEvent) -> IdleAction {
         let mut core = self.core.borrow_mut();
         let state = &mut core.state;
+        if is_image_paste_key(key) {
+            state.paste_clipboard_image();
+            return IdleAction::None;
+        }
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             match key.code {
                 KeyCode::Char('c') => return IdleAction::Exit,
                 KeyCode::Char('t') => {
                     state.expand_tools = !state.expand_tools;
-                    return IdleAction::None;
-                }
-                KeyCode::Char('v') => {
-                    state.paste_clipboard_image();
                     return IdleAction::None;
                 }
                 _ => return IdleAction::None,
@@ -946,7 +946,7 @@ fn draw_frame(frame: &mut Frame, state: &UiState) {
         frame.set_cursor_position((cursor_x as u16, input_inner.y));
     }
     let footer = state.notice.clone().unwrap_or_else(|| {
-        "Enter send · Ctrl-V image · Tab complete · PgUp/PgDn scroll · Ctrl-T tools · Ctrl-C cancel/exit"
+        "Enter send · Ctrl/Alt-V image · Tab complete · PgUp/PgDn scroll · Ctrl-T tools · Ctrl-C cancel/exit"
             .to_string()
     });
     frame.render_widget(
@@ -1501,6 +1501,12 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
     .split(vertical[1])[1]
 }
 
+fn is_image_paste_key(key: KeyEvent) -> bool {
+    key.modifiers
+        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        && matches!(key.code, KeyCode::Char('v') | KeyCode::Char('V'))
+}
+
 fn is_key_press(key: KeyEvent) -> bool {
     matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
 }
@@ -1664,6 +1670,29 @@ mod tests {
         assert_eq!(input.text, "second");
         input.next_history();
         assert_eq!(input.text, "/model");
+    }
+
+    #[test]
+    fn ctrl_and_alt_v_are_image_paste_shortcuts() {
+        for (code, modifiers) in [
+            (KeyCode::Char('v'), KeyModifiers::CONTROL),
+            (KeyCode::Char('v'), KeyModifiers::ALT),
+            (KeyCode::Char('V'), KeyModifiers::ALT),
+            (
+                KeyCode::Char('v'),
+                KeyModifiers::CONTROL | KeyModifiers::ALT,
+            ),
+        ] {
+            assert!(is_image_paste_key(KeyEvent::new(code, modifiers)));
+        }
+        assert!(!is_image_paste_key(KeyEvent::new(
+            KeyCode::Char('v'),
+            KeyModifiers::NONE,
+        )));
+        assert!(!is_image_paste_key(KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL,
+        )));
     }
 
     #[test]
