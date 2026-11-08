@@ -7,7 +7,7 @@ use crate::instructions::InstructionSet;
 use crate::mcp::McpManager;
 use crate::plugins::PluginManager;
 use crate::subagents::{self, SubagentConfig};
-use crate::tools::{PermissionMode, Workspace};
+use crate::tools::{ImageAttachment, PermissionMode, Workspace};
 use crate::web::{WebResearch, WebResearchConfig};
 
 pub enum AgentEvent {
@@ -37,6 +37,7 @@ pub struct Agent {
     options: AgentOptions,
     messages: Vec<Value>,
     image_support: Option<bool>,
+    pending_images: Vec<ImageAttachment>,
 }
 
 impl Agent {
@@ -69,11 +70,16 @@ impl Agent {
             options,
             messages: vec![system_message],
             image_support: None,
+            pending_images: Vec::new(),
         })
     }
 
     pub fn messages(&self) -> &[Value] {
         &self.messages
+    }
+
+    pub fn add_image_attachment(&mut self, image: ImageAttachment) {
+        self.pending_images.push(image);
     }
 
     pub fn restore_messages(&mut self, messages: Vec<Value>) -> Result<()> {
@@ -194,6 +200,7 @@ impl Agent {
 
     pub fn clear(&mut self) {
         self.messages.truncate(1);
+        self.pending_images.clear();
     }
 
     pub fn checkpoint(&self) -> usize {
@@ -369,14 +376,16 @@ impl Agent {
     }
 
     async fn build_user_message(&mut self, prompt: &str) -> Result<Value> {
+        let pending_images = std::mem::take(&mut self.pending_images);
         let references = prompt
             .split_whitespace()
             .filter_map(|token| token.strip_prefix('@'))
             .filter(|reference| !reference.is_empty())
             .collect::<Vec<_>>();
-        if references
-            .iter()
-            .any(|reference| Workspace::is_image_path(reference))
+        if !self.pending_images.is_empty()
+            || references
+                .iter()
+                .any(|reference| Workspace::is_image_path(reference))
         {
             self.ensure_image_support().await?;
         }
@@ -408,6 +417,20 @@ impl Agent {
                     "\n\n--- Attached file: {reference} ---\n{content}\n--- End attached file: {reference} ---"
                 ));
             }
+        }
+        for (index, image) in pending_images.into_iter().enumerate() {
+            expanded.push_str(&format!(
+                "\n\n[Attached clipboard image {} ({}x{} pixels)]",
+                index + 1,
+                image.width,
+                image.height
+            ));
+            image_parts.push(json!({
+                "type": "image_url",
+                "image_url": {
+                    "url": format!("data:{};base64,{}", image.mime, image.data)
+                }
+            }));
         }
         if image_parts.is_empty() {
             return Ok(json!({"role": "user", "content": expanded}));
@@ -973,4 +996,68 @@ fn tool_definitions(search_tool: Value) -> Value {
             }
         }
     ])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::client::RetryConfig;
+    use crate::tools::CommandRules;
+
+    #[tokio::test]
+    async fn pending_clipboard_images_are_added_to_multimodal_messages() {
+        let temp = tempfile::tempdir().unwrap();
+        let client = OpenAICompatibleClient::new(
+            "http://127.0.0.1:9/v1",
+            "test-key".to_string(),
+            "mock-model".to_string(),
+            None,
+            RetryConfig::default(),
+        )
+        .unwrap();
+        let workspace = Workspace::new(
+            temp.path(),
+            Box::new(|_| true),
+            PermissionMode::Ask,
+            CommandRules::default(),
+            temp.path().join("tasks"),
+        )
+        .unwrap();
+        let mut agent = Agent::new(
+            client,
+            workspace,
+            WebResearchConfig::default(),
+            McpManager::default(),
+            HooksConfig::default(),
+            PluginManager::default(),
+            AgentOptions {
+                max_steps: 1,
+                context_window: 1000,
+                auto_compact: false,
+                agents: Default::default(),
+                instructions: Default::default(),
+            },
+        )
+        .unwrap();
+        agent.image_support = Some(true);
+        agent.add_image_attachment(ImageAttachment::from_rgba(1, 1, &[255, 0, 0, 255]).unwrap());
+
+        let message = agent.build_user_message("Inspect this").await.unwrap();
+        let content = message["content"].as_array().unwrap();
+        assert_eq!(content[0]["type"], "text");
+        assert!(
+            content[0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("clipboard image 1")
+        );
+        assert_eq!(content[1]["type"], "image_url");
+        assert!(
+            content[1]["image_url"]["url"]
+                .as_str()
+                .unwrap()
+                .starts_with("data:image/png;base64,")
+        );
+        assert!(agent.pending_images.is_empty());
+    }
 }

@@ -26,6 +26,7 @@ use ratatui::{Frame, Terminal};
 use crate::agent::{Agent, AgentEvent};
 use crate::client::ModelInfo;
 use crate::session::{Session, SessionStore};
+use crate::tools::ImageAttachment;
 use crate::{SLASH_COMMANDS, handle_command, save_session};
 
 pub struct Interface {
@@ -51,6 +52,7 @@ struct UiState {
     expand_tools: bool,
     scroll_back: usize,
     page_size: usize,
+    notice: Option<String>,
     approval: Option<String>,
     model_picker: Option<ModelPicker>,
     effort_picker: Option<EffortPicker>,
@@ -85,6 +87,7 @@ struct InputState {
     history: Vec<String>,
     history_index: Option<usize>,
     draft: String,
+    attachments: Vec<ImageAttachment>,
 }
 
 enum IdleAction {
@@ -94,6 +97,24 @@ enum IdleAction {
 }
 
 impl UiState {
+    fn paste_clipboard_image(&mut self) {
+        match crate::clipboard::read_clipboard_image() {
+            Ok(Some(image)) => {
+                self.notice = Some(format!(
+                    "Attached clipboard image ({}x{} pixels)",
+                    image.width, image.height
+                ));
+                self.input.attachments.push(image);
+            }
+            Ok(None) => {
+                self.notice = Some("The clipboard does not contain an image.".to_string());
+            }
+            Err(error) => {
+                self.notice = Some(format!("Could not paste image: {error:#}"));
+            }
+        }
+    }
+
     fn handle_mouse(&mut self, kind: MouseEventKind) {
         match kind {
             MouseEventKind::ScrollUp => self.scroll_back = self.scroll_back.saturating_add(3),
@@ -220,7 +241,10 @@ impl Interface {
                 match outcome {
                     Some(Ok(result)) => {
                         if matches!(command.as_str(), "/new" | "/clear") {
-                            self.core.borrow_mut().state.entries.clear();
+                            let mut core = self.core.borrow_mut();
+                            core.state.entries.clear();
+                            core.state.input.attachments.clear();
+                            core.state.notice = None;
                         } else if command == "/resume" {
                             self.core.borrow_mut().state.entries =
                                 restored_conversation_entries(agent.messages());
@@ -355,14 +379,21 @@ impl Interface {
                     state.expand_tools = !state.expand_tools;
                     return IdleAction::None;
                 }
+                KeyCode::Char('v') => {
+                    state.paste_clipboard_image();
+                    return IdleAction::None;
+                }
                 _ => return IdleAction::None,
             }
         }
         match key.code {
             KeyCode::Enter => {
-                let prompt = state.input.text.trim().to_string();
-                if prompt.is_empty() {
+                let mut prompt = state.input.text.trim().to_string();
+                if prompt.is_empty() && state.input.attachments.is_empty() {
                     return IdleAction::None;
+                }
+                if prompt.is_empty() {
+                    prompt = "Describe the attached image.".to_string();
                 }
                 state.input.text.clear();
                 state.input.cursor = 0;
@@ -459,7 +490,16 @@ impl Interface {
     }
 
     async fn run_agent(&self, prompt: &str, agent: &mut Agent) {
-        self.push_entry(ConversationEntry::User(prompt.to_string()));
+        let attachments = self.core.borrow().state.input.attachments.clone();
+        let display_prompt = if attachments.is_empty() {
+            prompt.to_string()
+        } else {
+            format!("{prompt}\n[{} image(s) attached]", attachments.len())
+        };
+        self.push_entry(ConversationEntry::User(display_prompt));
+        for image in attachments {
+            agent.add_image_attachment(image);
+        }
         {
             let mut core = self.core.borrow_mut();
             core.state.working = true;
@@ -488,7 +528,10 @@ impl Interface {
             core.state.stream_agent = false;
         }
         match outcome {
-            Some(Ok(_)) => {}
+            Some(Ok(_)) => {
+                self.core.borrow_mut().state.input.attachments.clear();
+                self.core.borrow_mut().state.notice = None;
+            }
             Some(Err(error)) => self.push_entry(ConversationEntry::Error(format!("{error:#}"))),
             None => {
                 agent.rollback(checkpoint);
@@ -877,7 +920,12 @@ fn draw_frame(frame: &mut Frame, state: &UiState) {
     let top = total_lines.saturating_sub(height + scroll_back);
     frame.render_widget(conversation.scroll((top as u16, 0)), chunks[1]);
 
-    let input_block = Block::default().borders(Borders::TOP).title("you");
+    let input_title = if state.input.attachments.is_empty() {
+        "you".to_string()
+    } else {
+        format!("you · {} image(s) attached", state.input.attachments.len())
+    };
+    let input_block = Block::default().borders(Borders::TOP).title(input_title);
     let input_inner = input_block.inner(chunks[2]);
     let cursor_width = Span::raw(&state.input.text[..state.input.cursor]).width();
     let available = (input_inner.width as usize).saturating_sub(3);
@@ -897,11 +945,12 @@ fn draw_frame(frame: &mut Frame, state: &UiState) {
         let cursor_x = input_inner.x as usize + 2 + cursor_width - horizontal_scroll;
         frame.set_cursor_position((cursor_x as u16, input_inner.y));
     }
+    let footer = state.notice.clone().unwrap_or_else(|| {
+        "Enter send · Ctrl-V image · Tab complete · PgUp/PgDn scroll · Ctrl-T tools · Ctrl-C cancel/exit"
+            .to_string()
+    });
     frame.render_widget(
-        Paragraph::new(
-            "Enter send · Tab complete · PgUp/PgDn scroll · Ctrl-T tools · Ctrl-C cancel/exit",
-        )
-        .style(Style::default().fg(Color::DarkGray)),
+        Paragraph::new(footer).style(Style::default().fg(Color::DarkGray)),
         chunks[3],
     );
 

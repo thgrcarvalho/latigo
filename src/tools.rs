@@ -11,7 +11,7 @@ use anyhow::{Context, Result, bail};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use clap::ValueEnum;
 use glob::Pattern;
-use image::{GenericImageView, ImageFormat, ImageReader};
+use image::{DynamicImage, GenericImageView, ImageFormat, ImageReader, RgbaImage};
 use serde::Deserialize;
 use tokio::process::Command;
 use walkdir::{DirEntry, WalkDir};
@@ -92,11 +92,50 @@ impl CommandRules {
     }
 }
 
+#[derive(Clone)]
 pub struct ImageAttachment {
     pub mime: String,
     pub data: String,
     pub width: u32,
     pub height: u32,
+}
+
+impl ImageAttachment {
+    pub fn from_png_bytes(data: Vec<u8>) -> Result<Self> {
+        if data.len() > 10_000_000 {
+            bail!("Clipboard image exceeds the 10 MB limit");
+        }
+        let reader = ImageReader::new(Cursor::new(&data)).with_guessed_format()?;
+        if reader.format() != Some(ImageFormat::Png) {
+            bail!("Clipboard image is not PNG encoded");
+        }
+        let (width, height) = reader.decode()?.dimensions();
+        validate_image_dimensions(width, height)?;
+        Ok(Self {
+            mime: "image/png".to_string(),
+            data: BASE64.encode(data),
+            width,
+            height,
+        })
+    }
+
+    pub fn from_rgba(width: usize, height: usize, bytes: &[u8]) -> Result<Self> {
+        let width = u32::try_from(width).context("Clipboard image is too wide")?;
+        let height = u32::try_from(height).context("Clipboard image is too tall")?;
+        validate_image_dimensions(width, height)?;
+        let image = RgbaImage::from_raw(width, height, bytes.to_vec())
+            .context("Clipboard returned invalid RGBA image data")?;
+        let mut encoded = Cursor::new(Vec::new());
+        DynamicImage::ImageRgba8(image).write_to(&mut encoded, ImageFormat::Png)?;
+        Self::from_png_bytes(encoded.into_inner())
+    }
+}
+
+fn validate_image_dimensions(width: u32, height: u32) -> Result<()> {
+    if width == 0 || height == 0 || width > 8000 || height > 8000 {
+        bail!("Image dimensions must be between 1x1 and 8000x8000 pixels");
+    }
+    Ok(())
 }
 
 pub struct Workspace {
@@ -624,4 +663,29 @@ pub(crate) fn shell_command(command: &str) -> Command {
     };
     process.arg(command);
     process
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clipboard_rgba_pixels_become_a_valid_png_attachment() {
+        let attachment =
+            ImageAttachment::from_rgba(2, 1, &[255, 0, 0, 255, 0, 255, 0, 255]).unwrap();
+        assert_eq!(attachment.mime, "image/png");
+        assert_eq!((attachment.width, attachment.height), (2, 1));
+        let encoded = BASE64.decode(&attachment.data).unwrap();
+        let reader = ImageReader::new(Cursor::new(encoded))
+            .with_guessed_format()
+            .unwrap();
+        assert_eq!(reader.format(), Some(ImageFormat::Png));
+        assert_eq!(reader.decode().unwrap().dimensions(), (2, 1));
+    }
+
+    #[test]
+    fn clipboard_rejects_invalid_image_dimensions() {
+        assert!(ImageAttachment::from_rgba(0, 1, &[]).is_err());
+        assert!(ImageAttachment::from_rgba(1, 1, &[0, 0]).is_err());
+    }
 }

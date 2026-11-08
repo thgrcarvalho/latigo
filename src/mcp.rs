@@ -52,6 +52,7 @@ impl McpConfig {
     }
 }
 
+#[derive(Default)]
 pub struct McpManager {
     servers: BTreeMap<String, McpServer>,
     tools: BTreeMap<String, RemoteTool>,

@@ -21,7 +21,7 @@ A latigo is the strap that secures a saddle's cinch. Latigo secures the setup ar
 - Trusted plugin manifests that contribute commands, hooks, MCP servers, and subagents
 - Isolated subagents with configurable instructions, models, and tool restrictions
 - Context-window discovery and automatic or manual compaction
-- Text and image attachments
+- Text and image attachments, including clipboard screenshots with Ctrl-V
 - Workspace file search, reading, writing, and patching
 - Background command execution and task management
 - Kimi-hosted web search, with Brave as an optional alternative
@@ -197,7 +197,7 @@ Print mode retains the configured permission mode. If an action requires approva
 
 Interactive terminals use a full-screen Ratatui interface. Non-interactive runs and `TERM=dumb` retain the line-oriented interface.
 
-Use the up and down arrows to navigate input history and Tab to complete slash commands. In the Ratatui interface, the mouse wheel scrolls the conversation by three lines without changing the prompt, and PageUp and PageDown scroll by a page. `/models` and `/effort` open pickers: use Up/Down to move, Enter to select, and Escape to cancel. Effort choices and defaults come from the current model's metadata rather than a hardcoded list. Direct `/effort <value>` input remains available for provider-specific values. Ctrl-T expands or collapses tool output. Ctrl-C cancels active model work; at the prompt, Ctrl-C saves the session and exits. Approval dialogs accept `y` and reject with `n`, Enter, or Escape.
+Use the up and down arrows to navigate input history and Tab to complete slash commands. In the Ratatui interface, the mouse wheel scrolls the conversation by three lines without changing the prompt, and PageUp and PageDown scroll by a page. `/models` and `/effort` open pickers: use Up/Down to move, Enter to select, and Escape to cancel. Effort choices and defaults come from the current model's metadata rather than a hardcoded list. Direct `/effort <value>` input remains available for provider-specific values. Ctrl-V pastes a clipboard image, and Ctrl-T expands or collapses tool output. Ctrl-C cancels active model work; at the prompt, Ctrl-C saves the session and exits. Approval dialogs accept `y` and reject with `n`, Enter, or Escape.
 
 Sessions are stored in `~/.latigo/sessions` by default. Input history and background-task data are stored alongside them under `~/.latigo`.
 
@@ -226,6 +226,10 @@ PNG, JPEG, and WebP images are sent as multimodal attachments when the selected 
 ```text
 Describe @diagram.png and compare it with @src/agent.rs.
 ```
+
+In the Ratatui interface, press **Ctrl-V** to attach an image directly from the system clipboard. The input title shows the number of pending images, and clipboard errors appear in the footer. Add instructions and press Enter, or press Enter with an empty prompt to ask for a description. Images are encoded as PNG in memory and are not written into the workspace. If submission fails or is interrupted, the pending image remains available for retry; successful submission and `/clear` or `/new` clear it.
+
+Clipboard paste uses native clipboard APIs on Windows, macOS, and Linux. Linux requires an accessible X11 or compatible Wayland clipboard. On WSL, Latigo invokes Windows PowerShell directly and streams PNG bytes from the Windows clipboard, avoiding WSLg clipboard focus changes and requiring no custom `wl-paste` wrapper. The line-oriented interface and print mode continue to use `@path` attachments rather than interactive clipboard capture.
 
 Images are limited to 10 MB and 8000 by 8000 pixels. File references are whitespace-separated, so paths containing spaces are not currently supported.
 

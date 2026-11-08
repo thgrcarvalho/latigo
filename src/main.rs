@@ -1,5 +1,6 @@
 mod agent;
 mod client;
+mod clipboard;
 mod config;
 mod hooks;
 mod instructions;
