@@ -8,8 +8,8 @@ use std::time::Duration;
 use anyhow::Result;
 use crossterm::cursor::Show;
 use crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
-    KeyModifiers, MouseEventKind,
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -97,20 +97,49 @@ enum IdleAction {
 }
 
 impl UiState {
-    fn paste_clipboard_image(&mut self) {
-        match crate::clipboard::read_clipboard_image() {
+    fn paste_clipboard(&mut self, terminal_text: Option<String>) {
+        self.paste_with(
+            terminal_text,
+            crate::clipboard::read_clipboard_image,
+            crate::clipboard::read_clipboard_text,
+        );
+    }
+
+    fn paste_with(
+        &mut self,
+        terminal_text: Option<String>,
+        read_image: impl FnOnce() -> Result<Option<ImageAttachment>>,
+        read_text: impl FnOnce() -> Result<Option<String>>,
+    ) {
+        let image_error = match read_image() {
             Ok(Some(image)) => {
                 self.notice = Some(format!(
                     "Attached clipboard image ({}x{} pixels)",
                     image.width, image.height
                 ));
                 self.input.attachments.push(image);
+                return;
             }
-            Ok(None) => {
-                self.notice = Some("The clipboard does not contain an image.".to_string());
+            Ok(None) => None,
+            Err(error) => Some(error),
+        };
+        let text = match terminal_text.filter(|text| !text.is_empty()) {
+            Some(text) => Ok(Some(text)),
+            None => read_text(),
+        };
+        match text {
+            Ok(Some(text)) if !text.is_empty() => {
+                self.input.insert_text(&text);
+                self.notice = None;
+            }
+            Ok(_) => {
+                self.notice = Some(match image_error {
+                    Some(error) => format!("Could not paste clipboard contents: {error:#}"),
+                    None => "The clipboard does not contain an image or text.".to_string(),
+                });
             }
             Err(error) => {
-                self.notice = Some(format!("Could not paste image: {error:#}"));
+                self.notice = Some(format!("Could not paste clipboard contents: {error:#}"));
             }
         }
     }
@@ -128,16 +157,31 @@ impl Interface {
     pub fn new() -> Result<Self> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
-        if let Err(error) = execute!(stdout, EnterAlternateScreen, EnableMouseCapture) {
+        if let Err(error) = execute!(
+            stdout,
+            EnterAlternateScreen,
+            EnableMouseCapture,
+            EnableBracketedPaste
+        ) {
             let _ = disable_raw_mode();
-            let _ = execute!(io::stdout(), DisableMouseCapture, LeaveAlternateScreen);
+            let _ = execute!(
+                io::stdout(),
+                DisableBracketedPaste,
+                DisableMouseCapture,
+                LeaveAlternateScreen
+            );
             return Err(error.into());
         }
         let terminal = match Terminal::new(CrosstermBackend::new(stdout)) {
             Ok(terminal) => terminal,
             Err(error) => {
                 let _ = disable_raw_mode();
-                let _ = execute!(io::stdout(), DisableMouseCapture, LeaveAlternateScreen);
+                let _ = execute!(
+                    io::stdout(),
+                    DisableBracketedPaste,
+                    DisableMouseCapture,
+                    LeaveAlternateScreen
+                );
                 return Err(error.into());
             }
         };
@@ -360,6 +404,10 @@ impl Interface {
                     }
                     self.core.borrow_mut().draw()?;
                 }
+                Event::Paste(text) => {
+                    self.core.borrow_mut().state.paste_clipboard(Some(text));
+                    self.core.borrow_mut().draw()?;
+                }
                 Event::Mouse(mouse) => {
                     self.core.borrow_mut().state.handle_mouse(mouse.kind);
                     self.core.borrow_mut().draw()?;
@@ -372,8 +420,8 @@ impl Interface {
     fn handle_idle_key(&self, key: KeyEvent) -> IdleAction {
         let mut core = self.core.borrow_mut();
         let state = &mut core.state;
-        if is_image_paste_key(key) {
-            state.paste_clipboard_image();
+        if is_paste_shortcut(key) {
+            state.paste_clipboard(None);
             return IdleAction::None;
         }
         if key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -841,6 +889,7 @@ impl Drop for Interface {
         let mut core = self.core.borrow_mut();
         let _ = execute!(
             core.terminal.backend_mut(),
+            DisableBracketedPaste,
             DisableMouseCapture,
             LeaveAlternateScreen,
             Show
@@ -946,7 +995,7 @@ fn draw_frame(frame: &mut Frame, state: &UiState) {
         frame.set_cursor_position((cursor_x as u16, input_inner.y));
     }
     let footer = state.notice.clone().unwrap_or_else(|| {
-        "Enter send · Ctrl/Alt-V image · Tab complete · PgUp/PgDn scroll · Ctrl-T tools · Ctrl-C cancel/exit"
+        "Enter send · Ctrl/Alt-V paste · Tab complete · PgUp/PgDn scroll · Ctrl-T tools · Ctrl-C cancel/exit"
             .to_string()
     });
     frame.render_widget(
@@ -1382,6 +1431,16 @@ impl InputState {
         self.cursor += character.len_utf8();
     }
 
+    fn insert_text(&mut self, text: &str) {
+        for character in text.replace("\r\n", "\n").replace('\r', "\n").chars() {
+            match character {
+                '\n' => self.insert(' '),
+                character if !character.is_control() => self.insert(character),
+                _ => {}
+            }
+        }
+    }
+
     fn backspace(&mut self) {
         if let Some((index, _)) = self.text[..self.cursor].char_indices().next_back() {
             self.text.remove(index);
@@ -1501,7 +1560,7 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
     .split(vertical[1])[1]
 }
 
-fn is_image_paste_key(key: KeyEvent) -> bool {
+fn is_paste_shortcut(key: KeyEvent) -> bool {
     key.modifiers
         .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
         && matches!(key.code, KeyCode::Char('v') | KeyCode::Char('V'))
@@ -1673,6 +1732,51 @@ mod tests {
     }
 
     #[test]
+    fn paste_prefers_images_and_falls_back_to_text() {
+        let mut state = UiState::default();
+        state.paste_with(
+            Some("terminal text".to_string()),
+            || {
+                Ok(Some(
+                    ImageAttachment::from_rgba(1, 1, &[255, 0, 0, 255]).unwrap(),
+                ))
+            },
+            || panic!("terminal image paste must not read clipboard text"),
+        );
+        assert_eq!(state.input.attachments.len(), 1);
+        assert!(state.input.text.is_empty());
+
+        state.paste_with(
+            Some("terminal text".to_string()),
+            || Ok(None),
+            || panic!("terminal paste already supplied the text"),
+        );
+        assert_eq!(state.input.text, "terminal text");
+        assert_eq!(state.input.cursor, state.input.text.len());
+
+        state.input.text.clear();
+        state.input.cursor = 0;
+        state.paste_with(
+            None,
+            || Ok(None),
+            || Ok(Some("direct shortcut text".to_string())),
+        );
+        assert_eq!(state.input.text, "direct shortcut text");
+    }
+
+    #[test]
+    fn pasted_multiline_text_fits_the_single_line_input() {
+        let mut input = InputState {
+            text: "before  after".to_string(),
+            cursor: 7,
+            ..InputState::default()
+        };
+        input.insert_text("first\r\nsecond\nthird");
+        assert_eq!(input.text, "before first second third after");
+        assert_eq!(input.cursor, 25);
+    }
+
+    #[test]
     fn ctrl_and_alt_v_are_image_paste_shortcuts() {
         for (code, modifiers) in [
             (KeyCode::Char('v'), KeyModifiers::CONTROL),
@@ -1683,13 +1787,13 @@ mod tests {
                 KeyModifiers::CONTROL | KeyModifiers::ALT,
             ),
         ] {
-            assert!(is_image_paste_key(KeyEvent::new(code, modifiers)));
+            assert!(is_paste_shortcut(KeyEvent::new(code, modifiers)));
         }
-        assert!(!is_image_paste_key(KeyEvent::new(
+        assert!(!is_paste_shortcut(KeyEvent::new(
             KeyCode::Char('v'),
             KeyModifiers::NONE,
         )));
-        assert!(!is_image_paste_key(KeyEvent::new(
+        assert!(!is_paste_shortcut(KeyEvent::new(
             KeyCode::Char('c'),
             KeyModifiers::CONTROL,
         )));
