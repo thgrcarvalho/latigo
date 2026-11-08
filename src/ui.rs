@@ -26,7 +26,7 @@ use ratatui::{Frame, Terminal};
 use crate::agent::{Agent, AgentEvent};
 use crate::client::ModelInfo;
 use crate::session::{Session, SessionStore};
-use crate::tools::ImageAttachment;
+use crate::tools::{ImageAttachment, VideoAttachment};
 use crate::{SLASH_COMMANDS, handle_command, save_session};
 
 pub struct Interface {
@@ -88,6 +88,7 @@ struct InputState {
     history_index: Option<usize>,
     draft: String,
     attachments: Vec<ImageAttachment>,
+    video_attachments: Vec<VideoAttachment>,
 }
 
 enum IdleAction {
@@ -101,6 +102,7 @@ impl UiState {
         self.paste_with(
             terminal_text,
             crate::clipboard::read_clipboard_image,
+            crate::clipboard::read_clipboard_videos,
             crate::clipboard::read_clipboard_text,
         );
     }
@@ -109,6 +111,7 @@ impl UiState {
         &mut self,
         terminal_text: Option<String>,
         read_image: impl FnOnce() -> Result<Option<ImageAttachment>>,
+        read_videos: impl FnOnce() -> Result<Vec<VideoAttachment>>,
         read_text: impl FnOnce() -> Result<Option<String>>,
     ) {
         let image_error = match read_image() {
@@ -123,6 +126,16 @@ impl UiState {
             Ok(None) => None,
             Err(error) => Some(error),
         };
+        let video_error = match read_videos() {
+            Ok(videos) if !videos.is_empty() => {
+                let count = videos.len();
+                self.input.video_attachments.extend(videos);
+                self.notice = Some(format!("Attached {count} clipboard video(s)"));
+                return;
+            }
+            Ok(_) => None,
+            Err(error) => Some(error),
+        };
         let text = match terminal_text.filter(|text| !text.is_empty()) {
             Some(text) => Ok(Some(text)),
             None => read_text(),
@@ -133,9 +146,9 @@ impl UiState {
                 self.notice = None;
             }
             Ok(_) => {
-                self.notice = Some(match image_error {
+                self.notice = Some(match image_error.or(video_error) {
                     Some(error) => format!("Could not paste clipboard contents: {error:#}"),
-                    None => "The clipboard does not contain an image or text.".to_string(),
+                    None => "The clipboard does not contain media or text.".to_string(),
                 });
             }
             Err(error) => {
@@ -288,6 +301,7 @@ impl Interface {
                             let mut core = self.core.borrow_mut();
                             core.state.entries.clear();
                             core.state.input.attachments.clear();
+                            core.state.input.video_attachments.clear();
                             core.state.notice = None;
                         } else if command == "/resume" {
                             self.core.borrow_mut().state.entries =
@@ -437,11 +451,14 @@ impl Interface {
         match key.code {
             KeyCode::Enter => {
                 let mut prompt = state.input.text.trim().to_string();
-                if prompt.is_empty() && state.input.attachments.is_empty() {
+                if prompt.is_empty()
+                    && state.input.attachments.is_empty()
+                    && state.input.video_attachments.is_empty()
+                {
                     return IdleAction::None;
                 }
                 if prompt.is_empty() {
-                    prompt = "Describe the attached image.".to_string();
+                    prompt = "Describe the attached media.".to_string();
                 }
                 state.input.text.clear();
                 state.input.cursor = 0;
@@ -538,15 +555,31 @@ impl Interface {
     }
 
     async fn run_agent(&self, prompt: &str, agent: &mut Agent) {
-        let attachments = self.core.borrow().state.input.attachments.clone();
-        let display_prompt = if attachments.is_empty() {
+        let (attachments, videos) = {
+            let core = self.core.borrow();
+            (
+                core.state.input.attachments.clone(),
+                core.state.input.video_attachments.clone(),
+            )
+        };
+        let mut media = Vec::new();
+        if !attachments.is_empty() {
+            media.push(format!("{} image(s)", attachments.len()));
+        }
+        if !videos.is_empty() {
+            media.push(format!("{} video(s)", videos.len()));
+        }
+        let display_prompt = if media.is_empty() {
             prompt.to_string()
         } else {
-            format!("{prompt}\n[{} image(s) attached]", attachments.len())
+            format!("{prompt}\n[{} attached]", media.join(", "))
         };
         self.push_entry(ConversationEntry::User(display_prompt));
         for image in attachments {
             agent.add_image_attachment(image);
+        }
+        for video in videos {
+            agent.add_video_attachment(video);
         }
         {
             let mut core = self.core.borrow_mut();
@@ -577,8 +610,10 @@ impl Interface {
         }
         match outcome {
             Some(Ok(_)) => {
-                self.core.borrow_mut().state.input.attachments.clear();
-                self.core.borrow_mut().state.notice = None;
+                let mut core = self.core.borrow_mut();
+                core.state.input.attachments.clear();
+                core.state.input.video_attachments.clear();
+                core.state.notice = None;
             }
             Some(Err(error)) => self.push_entry(ConversationEntry::Error(format!("{error:#}"))),
             None => {
@@ -969,10 +1004,14 @@ fn draw_frame(frame: &mut Frame, state: &UiState) {
     let top = total_lines.saturating_sub(height + scroll_back);
     frame.render_widget(conversation.scroll((top as u16, 0)), chunks[1]);
 
-    let input_title = if state.input.attachments.is_empty() {
-        "you".to_string()
-    } else {
-        format!("you · {} image(s) attached", state.input.attachments.len())
+    let input_title = match (
+        state.input.attachments.len(),
+        state.input.video_attachments.len(),
+    ) {
+        (0, 0) => "you".to_string(),
+        (images, 0) => format!("you · {images} image(s) attached"),
+        (0, videos) => format!("you · {videos} video(s) attached"),
+        (images, videos) => format!("you · {images} image(s), {videos} video(s) attached"),
     };
     let input_block = Block::default().borders(Borders::TOP).title(input_title);
     let input_inner = input_block.inner(chunks[2]);
@@ -1611,6 +1650,7 @@ mod tests {
                 display_name: "First".to_string(),
                 context_length: Some(1000),
                 supports_image_in: None,
+                supports_video_in: None,
                 reasoning_effort: None,
             },
             ModelInfo {
@@ -1618,6 +1658,7 @@ mod tests {
                 display_name: "Second".to_string(),
                 context_length: Some(2000),
                 supports_image_in: None,
+                supports_video_in: None,
                 reasoning_effort: None,
             },
         ];
@@ -1732,7 +1773,7 @@ mod tests {
     }
 
     #[test]
-    fn paste_prefers_images_and_falls_back_to_text() {
+    fn paste_prefers_media_and_falls_back_to_text() {
         let mut state = UiState::default();
         state.paste_with(
             Some("terminal text".to_string()),
@@ -1741,6 +1782,7 @@ mod tests {
                     ImageAttachment::from_rgba(1, 1, &[255, 0, 0, 255]).unwrap(),
                 ))
             },
+            || panic!("image paste must not read clipboard videos"),
             || panic!("terminal image paste must not read clipboard text"),
         );
         assert_eq!(state.input.attachments.len(), 1);
@@ -1749,6 +1791,7 @@ mod tests {
         state.paste_with(
             Some("terminal text".to_string()),
             || Ok(None),
+            || Ok(Vec::new()),
             || panic!("terminal paste already supplied the text"),
         );
         assert_eq!(state.input.text, "terminal text");
@@ -1759,9 +1802,29 @@ mod tests {
         state.paste_with(
             None,
             || Ok(None),
+            || Ok(Vec::new()),
             || Ok(Some("direct shortcut text".to_string())),
         );
         assert_eq!(state.input.text, "direct shortcut text");
+    }
+
+    #[test]
+    fn paste_attaches_copied_videos() {
+        let mut state = UiState::default();
+        state.paste_with(
+            None,
+            || Ok(None),
+            || {
+                Ok(vec![VideoAttachment {
+                    name: "clip.mp4".to_string(),
+                    mime: "video/mp4".to_string(),
+                    data: "bW9jaw==".to_string(),
+                }])
+            },
+            || panic!("video paste must not read clipboard text"),
+        );
+        assert_eq!(state.input.video_attachments.len(), 1);
+        assert_eq!(state.input.video_attachments[0].name, "clip.mp4");
     }
 
     #[test]

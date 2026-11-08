@@ -7,7 +7,7 @@ use crate::instructions::InstructionSet;
 use crate::mcp::McpManager;
 use crate::plugins::PluginManager;
 use crate::subagents::{self, SubagentConfig};
-use crate::tools::{ImageAttachment, PermissionMode, Workspace};
+use crate::tools::{ImageAttachment, PermissionMode, VideoAttachment, Workspace};
 use crate::web::{WebResearch, WebResearchConfig};
 
 pub enum AgentEvent {
@@ -37,7 +37,9 @@ pub struct Agent {
     options: AgentOptions,
     messages: Vec<Value>,
     image_support: Option<bool>,
+    video_support: Option<bool>,
     pending_images: Vec<ImageAttachment>,
+    pending_videos: Vec<VideoAttachment>,
 }
 
 impl Agent {
@@ -70,7 +72,9 @@ impl Agent {
             options,
             messages: vec![system_message],
             image_support: None,
+            video_support: None,
             pending_images: Vec::new(),
+            pending_videos: Vec::new(),
         })
     }
 
@@ -80,6 +84,10 @@ impl Agent {
 
     pub fn add_image_attachment(&mut self, image: ImageAttachment) {
         self.pending_images.push(image);
+    }
+
+    pub fn add_video_attachment(&mut self, video: VideoAttachment) {
+        self.pending_videos.push(video);
     }
 
     pub fn restore_messages(&mut self, messages: Vec<Value>) -> Result<()> {
@@ -102,6 +110,7 @@ impl Agent {
     pub fn set_model(&mut self, model: String) {
         self.client.set_model(model);
         self.image_support = None;
+        self.video_support = None;
     }
 
     pub fn reasoning_effort(&self) -> Option<&str> {
@@ -201,6 +210,7 @@ impl Agent {
     pub fn clear(&mut self) {
         self.messages.truncate(1);
         self.pending_images.clear();
+        self.pending_videos.clear();
     }
 
     pub fn checkpoint(&self) -> usize {
@@ -377,21 +387,29 @@ impl Agent {
 
     async fn build_user_message(&mut self, prompt: &str) -> Result<Value> {
         let pending_images = std::mem::take(&mut self.pending_images);
+        let pending_videos = std::mem::take(&mut self.pending_videos);
         let references = prompt
             .split_whitespace()
             .filter_map(|token| token.strip_prefix('@'))
             .filter(|reference| !reference.is_empty())
             .collect::<Vec<_>>();
-        if !self.pending_images.is_empty()
+        if !pending_images.is_empty()
             || references
                 .iter()
                 .any(|reference| Workspace::is_image_path(reference))
         {
             self.ensure_image_support().await?;
         }
+        if !pending_videos.is_empty()
+            || references
+                .iter()
+                .any(|reference| Workspace::is_video_path(reference))
+        {
+            self.ensure_video_support().await?;
+        }
 
         let mut expanded = prompt.to_string();
-        let mut image_parts = Vec::new();
+        let mut media_parts = Vec::new();
         for reference in references {
             if Workspace::is_image_path(reference) {
                 let image = self
@@ -402,10 +420,22 @@ impl Agent {
                     "\n\n[Attached image: {reference} ({}x{} pixels)]",
                     image.width, image.height
                 ));
-                image_parts.push(json!({
+                media_parts.push(json!({
                     "type": "image_url",
                     "image_url": {
                         "url": format!("data:{};base64,{}", image.mime, image.data)
+                    }
+                }));
+            } else if Workspace::is_video_path(reference) {
+                let video = self
+                    .workspace
+                    .read_video(reference)
+                    .with_context(|| format!("Could not attach @{reference}"))?;
+                expanded.push_str(&format!("\n\n[Attached video: {reference}]"));
+                media_parts.push(json!({
+                    "type": "video_url",
+                    "video_url": {
+                        "url": self.client.video_content_url(&video).await?
                     }
                 }));
             } else {
@@ -425,18 +455,31 @@ impl Agent {
                 image.width,
                 image.height
             ));
-            image_parts.push(json!({
+            media_parts.push(json!({
                 "type": "image_url",
                 "image_url": {
                     "url": format!("data:{};base64,{}", image.mime, image.data)
                 }
             }));
         }
-        if image_parts.is_empty() {
+        for (index, video) in pending_videos.into_iter().enumerate() {
+            expanded.push_str(&format!(
+                "\n\n[Attached clipboard video {} ({})]",
+                index + 1,
+                video.name
+            ));
+            media_parts.push(json!({
+                "type": "video_url",
+                "video_url": {
+                    "url": self.client.video_content_url(&video).await?
+                }
+            }));
+        }
+        if media_parts.is_empty() {
             return Ok(json!({"role": "user", "content": expanded}));
         }
         let mut parts = vec![json!({"type": "text", "text": expanded})];
-        parts.extend(image_parts);
+        parts.extend(media_parts);
         Ok(json!({"role": "user", "content": parts}))
     }
 
@@ -452,6 +495,23 @@ impl Agent {
         if !supported {
             bail!(
                 "The selected model does not support image input or its capabilities are unknown"
+            );
+        }
+        Ok(())
+    }
+
+    async fn ensure_video_support(&mut self) -> Result<()> {
+        if self.video_support == Some(true) {
+            return Ok(());
+        }
+        if self.video_support == Some(false) {
+            bail!("The selected model does not support video input");
+        }
+        let supported = self.client.model_supports_video().await?.unwrap_or(false);
+        self.video_support = Some(supported);
+        if !supported {
+            bail!(
+                "The selected model does not support video input or its capabilities are unknown"
             );
         }
         Ok(())
@@ -1040,7 +1100,13 @@ mod tests {
         )
         .unwrap();
         agent.image_support = Some(true);
+        agent.video_support = Some(true);
         agent.add_image_attachment(ImageAttachment::from_rgba(1, 1, &[255, 0, 0, 255]).unwrap());
+        agent.add_video_attachment(VideoAttachment {
+            name: "clip.mp4".to_string(),
+            mime: "video/mp4".to_string(),
+            data: "bW9jaw==".to_string(),
+        });
 
         let message = agent.build_user_message("Inspect this").await.unwrap();
         let content = message["content"].as_array().unwrap();
@@ -1051,6 +1117,12 @@ mod tests {
                 .unwrap()
                 .contains("clipboard image 1")
         );
+        assert!(
+            content[0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("clipboard video 1")
+        );
         assert_eq!(content[1]["type"], "image_url");
         assert!(
             content[1]["image_url"]["url"]
@@ -1058,6 +1130,14 @@ mod tests {
                 .unwrap()
                 .starts_with("data:image/png;base64,")
         );
+        assert_eq!(content[2]["type"], "video_url");
+        assert!(
+            content[2]["video_url"]["url"]
+                .as_str()
+                .unwrap()
+                .starts_with("data:video/mp4;base64,")
+        );
         assert!(agent.pending_images.is_empty());
+        assert!(agent.pending_videos.is_empty());
     }
 }

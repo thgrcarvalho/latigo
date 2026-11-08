@@ -629,6 +629,37 @@ fn sends_multimodal_image_attachments() {
 }
 
 #[test]
+fn sends_multimodal_video_attachments() {
+    let provider = MockProvider::start(vec![
+        MockResponse::json(
+            200,
+            json!({
+                "data": [{"id": "mock-model", "supports_video_in": true}]
+            }),
+        ),
+        MockResponse::text("Video accepted"),
+    ]);
+    let project = TestProject::new(&provider);
+    fs::write(project.workspace.join("clip.mp4"), b"mock-video-data").unwrap();
+    let output = project.run("Analyze @clip.mp4\n/exit\n");
+    assert!(stdout(&output).contains("Video accepted"));
+    let requests = provider.requests();
+    let chat = requests
+        .iter()
+        .find(|request| request.path == "/v1/chat/completions")
+        .unwrap();
+    let content = &chat.body["messages"][1]["content"];
+    assert!(content.is_array());
+    assert_eq!(content[1]["type"], "video_url");
+    assert!(
+        content[1]["video_url"]["url"]
+            .as_str()
+            .unwrap()
+            .starts_with("data:video/mp4;base64,")
+    );
+}
+
+#[test]
 fn coding_tools_and_text_attachments_work_together() {
     let provider = MockProvider::start(vec![
         MockResponse::tool_call(

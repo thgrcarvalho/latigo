@@ -21,7 +21,7 @@ A latigo is the strap that secures a saddle's cinch. Latigo secures the setup ar
 - Trusted plugin manifests that contribute commands, hooks, MCP servers, and subagents
 - Isolated subagents with configurable instructions, models, and tool restrictions
 - Context-window discovery and automatic or manual compaction
-- Text and image attachments, including clipboard screenshots with Ctrl-V
+- Text, image, and video attachments, including clipboard screenshots and copied video files
 - Workspace file search, reading, writing, and patching
 - Background command execution and task management
 - Kimi-hosted web search, with Brave as an optional alternative
@@ -221,17 +221,18 @@ Reference workspace files with `@path` in a prompt:
 Review @src/main.rs and explain the command flow.
 ```
 
-PNG, JPEG, and WebP images are sent as multimodal attachments when the selected model supports images:
+PNG, JPEG, and WebP images and MP4, MPEG, MOV, AVI, FLV, MPG, WebM, WMV, and 3GP videos are sent as multimodal attachments when the selected model supports the corresponding input:
 
 ```text
 Describe @diagram.png and compare it with @src/agent.rs.
+Summarize the UI flow in @demo.mp4.
 ```
 
-In the Ratatui interface, press **Ctrl-V** or **Alt-V** to paste from the system clipboard. Latigo attaches an image when one is available and otherwise inserts the clipboard text. Terminal-driven paste shortcuts, including Windows Terminal's Ctrl-V, work through bracketed paste; Latigo checks the clipboard for an image even when the terminal supplies no text. Pasted line breaks become spaces in the single-line prompt. The input title shows the number of pending images, and clipboard errors appear in the footer. Add instructions and press Enter, or press Enter with an empty prompt to ask for a description. Images are encoded as PNG in memory and are not written into the workspace. If submission fails or is interrupted, pending images remain available for retry; successful submission and `/clear` or `/new` clear them.
+In the Ratatui interface, press **Ctrl-V** or **Alt-V** to paste from the system clipboard. Latigo attaches an image when one is available, then checks for copied video files, and otherwise inserts the clipboard text. To attach videos, copy one or more supported files in your file manager before pasting. Terminal-driven paste shortcuts, including Windows Terminal's Ctrl-V, work through bracketed paste; Latigo checks the clipboard for media even when the terminal supplies no text. Pasted line breaks become spaces in the single-line prompt. The input title shows the number of pending attachments, and clipboard errors appear in the footer. Add instructions and press Enter, or press Enter with an empty prompt to ask for a description. Images are encoded as PNG in memory and are not written into the workspace. If submission fails or is interrupted, pending media remains available for retry; successful submission and `/clear` or `/new` clear it.
 
-Clipboard paste uses native clipboard APIs on Windows, macOS, and Linux. Linux requires an accessible X11 or compatible Wayland clipboard. On WSL, Latigo invokes Windows PowerShell directly to stream PNG images and read Unicode text from the Windows clipboard, avoiding WSLg clipboard focus changes and requiring no custom `wl-paste` wrapper. The line-oriented interface and print mode continue to use `@path` attachments rather than interactive clipboard capture.
+Clipboard paste uses native clipboard APIs on Windows, macOS, and Linux. Linux requires an accessible X11 or compatible Wayland clipboard. On WSL, Latigo invokes Windows PowerShell directly to stream PNG images, read copied file paths, and read Unicode text from the Windows clipboard, avoiding WSLg clipboard focus changes and requiring no custom `wl-paste` wrapper. The line-oriented interface and print mode continue to use `@path` attachments rather than interactive clipboard capture.
 
-Images are limited to 10 MB and 8000 by 8000 pixels. File references are whitespace-separated, so paths containing spaces are not currently supported.
+Images are limited to 10 MB and 8000 by 8000 pixels. Videos are limited to 20 MB each; larger videos are not currently supported. Kimi endpoints upload videos with `purpose=video` and reference the returned `ms://` file ID, which remains available for follow-up turns and resumed sessions. Other OpenAI-compatible providers receive base64 video data. File references are whitespace-separated, so paths containing spaces are not currently supported.
 
 ## Built-in tools
 

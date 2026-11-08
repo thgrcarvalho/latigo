@@ -131,6 +131,51 @@ impl ImageAttachment {
     }
 }
 
+#[derive(Clone)]
+pub struct VideoAttachment {
+    pub name: String,
+    pub mime: String,
+    pub data: String,
+}
+
+impl VideoAttachment {
+    pub fn from_path(path: &Path) -> Result<Self> {
+        let mime = video_mime(path)
+            .with_context(|| format!("Unsupported video format: {}", path.display()))?;
+        let metadata = fs::metadata(path)?;
+        if metadata.len() > 20_000_000 {
+            bail!("Video exceeds the 20 MB limit: {}", path.display());
+        }
+        if !metadata.is_file() {
+            bail!("Not a file: {}", path.display());
+        }
+        Ok(Self {
+            name: path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned(),
+            mime: mime.to_string(),
+            data: BASE64.encode(fs::read(path)?),
+        })
+    }
+}
+
+pub fn video_mime(path: &Path) -> Option<&'static str> {
+    match path.extension()?.to_str()?.to_ascii_lowercase().as_str() {
+        "mp4" => Some("video/mp4"),
+        "mpeg" => Some("video/mpeg"),
+        "mov" => Some("video/mov"),
+        "avi" => Some("video/avi"),
+        "flv" => Some("video/x-flv"),
+        "mpg" => Some("video/mpg"),
+        "webm" => Some("video/webm"),
+        "wmv" => Some("video/wmv"),
+        "3gp" => Some("video/3gpp"),
+        _ => None,
+    }
+}
+
 fn validate_image_dimensions(width: u32, height: u32) -> Result<()> {
     if width == 0 || height == 0 || width > 8000 || height > 8000 {
         bail!("Image dimensions must be between 1x1 and 8000x8000 pixels");
@@ -264,6 +309,16 @@ impl Workspace {
             width,
             height,
         })
+    }
+
+    pub fn is_video_path(path: &str) -> bool {
+        video_mime(Path::new(path)).is_some()
+    }
+
+    pub fn read_video(&self, path: &str) -> Result<VideoAttachment> {
+        let file_path = self.resolve(path)?;
+        self.ensure_not_sensitive(&file_path)?;
+        VideoAttachment::from_path(&file_path)
     }
 
     fn collect_files(&self, path: &str) -> Result<Vec<PathBuf>> {

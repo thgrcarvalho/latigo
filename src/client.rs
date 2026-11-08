@@ -2,12 +2,14 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use futures_util::StreamExt;
 use rand::Rng;
-use reqwest::{Client, Method, Response};
+use reqwest::{Client, Method, Response, multipart};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use crate::tools::VideoAttachment;
 use crate::util::truncate;
 
 #[derive(Clone, Deserialize)]
@@ -62,6 +64,7 @@ pub struct ModelInfo {
     pub display_name: String,
     pub context_length: Option<usize>,
     pub supports_image_in: Option<bool>,
+    pub supports_video_in: Option<bool>,
     pub reasoning_effort: Option<ReasoningEffortInfo>,
 }
 
@@ -71,6 +74,8 @@ pub struct OpenAICompatibleClient {
     endpoint: String,
     models_endpoint: String,
     search_endpoint: String,
+    files_endpoint: String,
+    upload_videos: bool,
     api_key: String,
     model: String,
     reasoning_effort: Option<String>,
@@ -90,11 +95,20 @@ impl OpenAICompatibleClient {
             .connect_timeout(Duration::from_secs(30))
             .build()?;
         let base_url = base_url.trim_end_matches('/');
+        let upload_videos = [
+            "https://api.kimi.ai/",
+            "https://api.moonshot.ai/",
+            "https://api.moonshot.cn/",
+        ]
+        .iter()
+        .any(|prefix| base_url.starts_with(prefix));
         Ok(Self {
             client,
             endpoint: format!("{base_url}/chat/completions"),
             models_endpoint: format!("{base_url}/models"),
             search_endpoint: format!("{base_url}/search"),
+            files_endpoint: format!("{base_url}/files"),
+            upload_videos,
             api_key,
             model,
             reasoning_effort,
@@ -168,11 +182,22 @@ impl OpenAICompatibleClient {
                             .and_then(Value::as_array)
                             .map(|inputs| inputs.iter().any(|input| input == "image"))
                     });
+                let supports_video_in = entry
+                    .get("supports_video_in")
+                    .and_then(Value::as_bool)
+                    .or_else(|| {
+                        entry
+                            .get("modalities")
+                            .and_then(|modalities| modalities.get("input"))
+                            .and_then(Value::as_array)
+                            .map(|inputs| inputs.iter().any(|input| input == "video"))
+                    });
                 Some(ModelInfo {
                     id: id.to_string(),
                     display_name: display_name.to_string(),
                     context_length,
                     supports_image_in,
+                    supports_video_in,
                     reasoning_effort: reasoning_effort_info(entry),
                 })
             })
@@ -198,6 +223,59 @@ impl OpenAICompatibleClient {
             .into_iter()
             .find(|model| model.id == self.model)
             .and_then(|model| model.supports_image_in))
+    }
+
+    pub async fn model_supports_video(&self) -> Result<Option<bool>> {
+        Ok(self
+            .list_models()
+            .await?
+            .into_iter()
+            .find(|model| model.id == self.model)
+            .and_then(|model| model.supports_video_in))
+    }
+
+    pub async fn video_content_url(&self, video: &VideoAttachment) -> Result<String> {
+        if self.upload_videos {
+            self.upload_video(video).await
+        } else {
+            Ok(format!("data:{};base64,{}", video.mime, video.data))
+        }
+    }
+
+    async fn upload_video(&self, video: &VideoAttachment) -> Result<String> {
+        let bytes = BASE64.decode(&video.data)?;
+        let part = multipart::Part::bytes(bytes)
+            .file_name(video.name.clone())
+            .mime_str(&video.mime)?;
+        let form = multipart::Form::new()
+            .text("purpose", "video")
+            .part("file", part);
+        let response = self
+            .client
+            .post(&self.files_endpoint)
+            .bearer_auth(&self.api_key)
+            .multipart(form)
+            .send()
+            .await
+            .context("Could not upload the video to Kimi")?;
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .context("Could not read the Kimi video upload response")?;
+        if !status.is_success() {
+            bail!(
+                "Kimi video upload returned HTTP {status}: {}",
+                truncate(&body, 1000)
+            );
+        }
+        let data: Value =
+            serde_json::from_str(&body).context("Kimi video upload returned invalid JSON")?;
+        let id = data
+            .get("id")
+            .and_then(Value::as_str)
+            .context("Kimi video upload did not return a file ID")?;
+        Ok(format!("ms://{id}"))
     }
 
     pub async fn hosted_search(
@@ -602,5 +680,51 @@ mod tests {
         assert_eq!(fallback.default.as_deref(), Some("high"));
 
         assert!(reasoning_effort_info(&json!({"reasoning": {"type": "only"}})).is_none());
+    }
+
+    #[tokio::test]
+    async fn uploads_videos_for_kimi_file_urls() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::thread;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = [0_u8; 16384];
+            let count = stream.read(&mut buffer).unwrap();
+            let request = String::from_utf8_lossy(&buffer[..count]);
+            assert!(request.starts_with("POST /v1/files HTTP/1.1"));
+            assert!(request.contains("name=\"purpose\""));
+            assert!(request.contains("video"));
+            assert!(request.contains("filename=\"clip.mp4\""));
+            assert!(request.contains("mock"));
+            let body = r#"{"id":"uploaded-video"}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+        let mut client = OpenAICompatibleClient::new(
+            &format!("http://{address}/v1"),
+            "test-key".to_string(),
+            "mock-model".to_string(),
+            None,
+            RetryConfig::default(),
+        )
+        .unwrap();
+        client.upload_videos = true;
+        let video = VideoAttachment {
+            name: "clip.mp4".to_string(),
+            mime: "video/mp4".to_string(),
+            data: "bW9jaw==".to_string(),
+        };
+
+        let url = client.video_content_url(&video).await.unwrap();
+        assert_eq!(url, "ms://uploaded-video");
+        server.join().unwrap();
     }
 }
